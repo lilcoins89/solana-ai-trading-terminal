@@ -1,10 +1,8 @@
-"""
-Solana AI Trading Terminal - Backend
-Educational / research only. Paper trading default. Real trading OFF.
-"""
+"""Solana AI Trading Terminal — FastAPI backend. Paper mode. Educational only."""
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,19 +28,26 @@ from data.dexscreener import (
     boosted_tokens,
     latest_token_profiles,
 )
-from data.helius import enrich_token, helius_configured, get_holder_concentration, get_token_authorities
+from data.helius import (
+    enrich_token,
+    helius_configured,
+    get_holder_concentration,
+    get_token_authorities,
+)
 from data.rugcheck import enrich_rugcheck, get_report, get_summary
 from data.solscan import enrich_solscan
 from analysis.pipeline import run_analysis
 from analysis.schemas import Decision
 
+VERSION = "0.4.1"
+
 app = FastAPI(
     title="Solana AI Trading Terminal",
     description=(
-        "Multi-agent Solana analysis: DexScreener + Helius + RugCheck LP/snipers + Solscan links. "
+        "Multi-agent Solana analysis: DexScreener + Helius + RugCheck + Solscan. "
         "Paper trading only by default."
     ),
-    version="0.4.0",
+    version=VERSION,
 )
 
 app.add_middleware(
@@ -58,17 +63,21 @@ _paper_trades: list[dict] = []
 _paper_positions: dict[str, dict] = {}
 
 
-async def _cross_enrich(mint: str, pair_address: str | None = None) -> dict:
-    rug = await enrich_rugcheck(mint)
-    sol = await enrich_solscan(mint, pair_address)
-    return {"rugcheck": rug, "solscan": sol}
+async def _enrich_all(mint: str, pair_address: str | None = None) -> tuple[dict, dict]:
+    """Parallel Helius + RugCheck + Solscan."""
+    helius, rug, sol = await asyncio.gather(
+        enrich_token(mint),
+        enrich_rugcheck(mint),
+        enrich_solscan(mint, pair_address),
+    )
+    return helius, {"rugcheck": rug, "solscan": sol}
 
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "version": "0.4.0",
+        "version": VERSION,
         "mode": "paper",
         "real_trading": False,
         "helius_configured": helius_configured(),
@@ -121,8 +130,7 @@ async def _best_market(token_address: str) -> dict:
 async def analyze_token(token_address: str):
     market = await _best_market(token_address)
     mint = (market.get("base_token") or {}).get("address") or token_address
-    helius = await enrich_token(mint)
-    cross = await _cross_enrich(mint, market.get("pair_address"))
+    helius, cross = await _enrich_all(mint, market.get("pair_address"))
     return run_analysis(market, helius, cross)
 
 
@@ -137,8 +145,7 @@ async def analyze_batch(req: BatchAnalyzeRequest):
         try:
             market = await _best_market(addr.strip())
             mint = (market.get("base_token") or {}).get("address") or addr.strip()
-            helius = await enrich_token(mint)
-            cross = await _cross_enrich(mint, market.get("pair_address"))
+            helius, cross = await _enrich_all(mint, market.get("pair_address"))
             results.append(run_analysis(market, helius, cross).model_dump())
         except Exception as e:
             results.append({"token": {"address": addr}, "error": str(e)})
@@ -152,24 +159,21 @@ async def market_snapshot(token_address: str):
 
 @app.get("/crosscheck/{token_address}")
 async def crosscheck(token_address: str):
-    """Raw RugCheck + Solscan enrichment for a mint."""
     market = None
     try:
         market = await _best_market(token_address)
     except Exception:
         pass
-    mint = token_address
-    if market:
-        mint = (market.get("base_token") or {}).get("address") or token_address
-    return await _cross_enrich(mint, (market or {}).get("pair_address"))
+    mint = (
+        (market.get("base_token") or {}).get("address") if market else None
+    ) or token_address
+    _, cross = await _enrich_all(mint, (market or {}).get("pair_address"))
+    return cross
 
 
 @app.get("/rugcheck/{token_address}")
 async def rugcheck_report(token_address: str, summary: bool = False):
-    if summary:
-        data = await get_summary(token_address)
-    else:
-        data = await get_report(token_address)
+    data = await (get_summary(token_address) if summary else get_report(token_address))
     if not data:
         raise HTTPException(404, "RugCheck report not found")
     return data
@@ -287,7 +291,12 @@ async def paper_trade(req: PaperTradeRequest):
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     _paper_trades.append(trade)
-    return {"ok": True, "trade": trade, "balance_usd": _paper_balance, "positions": list(_paper_positions.values())}
+    return {
+        "ok": True,
+        "trade": trade,
+        "balance_usd": _paper_balance,
+        "positions": list(_paper_positions.values()),
+    }
 
 
 @app.post("/paper/reset")
