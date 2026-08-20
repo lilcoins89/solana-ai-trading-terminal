@@ -10,7 +10,18 @@ type Decision = {
   confidence: number;
   liquidity_score: number;
   volume_momentum: string;
-  holder_risk: { score: number; flags: string[]; notes: string };
+  holder_risk: {
+    score: number;
+    top1_pct?: number | null;
+    top5_pct?: number | null;
+    top10_pct?: number | null;
+    top20_pct?: number | null;
+    mint_authority_renounced?: boolean | null;
+    freeze_authority_renounced?: boolean | null;
+    helius_configured?: boolean;
+    flags: string[];
+    notes: string;
+  };
   social_sentiment: string;
   technical_signals: string[];
   entry_zone: { low?: number; high?: number };
@@ -34,6 +45,12 @@ type Decision = {
   timestamp: string;
 };
 
+function authLabel(v?: boolean | null) {
+  if (v === true) return "Renounced ✓";
+  if (v === false) return "ACTIVE ⚠";
+  return "Unknown";
+}
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -47,7 +64,6 @@ export default function Home() {
     setError(null);
     setDecision(null);
     try {
-      // If looks like a mint, analyze directly
       if (query.trim().length >= 32 && !query.includes(" ")) {
         await analyze(query.trim());
         setSearchResults([]);
@@ -101,7 +117,7 @@ export default function Home() {
         <div>
           <h1 style={{ margin: 0, fontSize: "1.5rem" }}>Solana AI Trading Terminal</h1>
           <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-            Multi-agent · v0.2 · Paper mode · Educational only
+            Multi-agent · Helius · v0.3 · Paper mode · Educational only
           </p>
         </div>
         <WalletMultiButton />
@@ -121,7 +137,7 @@ export default function Home() {
           </button>
         </div>
         <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.75rem" }}>
-          API: {API} · Real trading disabled · DYOR
+          API: {API} · Set HELIUS_API_KEY for holder concentration · Real trading off
         </p>
       </div>
 
@@ -168,7 +184,7 @@ export default function Home() {
           {!decision && (
             <p style={{ color: "var(--muted)" }}>
               Select a token to run Technical · Risk · Sentiment · Narrative · Bull/Bear ·
-              Trader · Risk Manager.
+              Trader · Risk Manager (+ Helius holders).
             </p>
           )}
           {decision && (
@@ -217,16 +233,30 @@ export default function Home() {
                   <strong>{decision.social_sentiment}</strong>
                 </div>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Risk / Reward</div>
-                  <strong>{decision.risk_reward ?? "—"}</strong>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Top-10 holders</div>
+                  <strong>
+                    {decision.holder_risk.top10_pct != null
+                      ? `${decision.holder_risk.top10_pct}%`
+                      : decision.holder_risk.helius_configured
+                        ? "—"
+                        : "Set Helius key"}
+                  </strong>
                 </div>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Pair Age</div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Top-1 holder</div>
                   <strong>
-                    {decision.market?.age_hours != null
-                      ? `${decision.market.age_hours}h`
+                    {decision.holder_risk.top1_pct != null
+                      ? `${decision.holder_risk.top1_pct}%`
                       : "—"}
                   </strong>
+                </div>
+                <div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Mint authority</div>
+                  <strong>{authLabel(decision.holder_risk.mint_authority_renounced)}</strong>
+                </div>
+                <div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Freeze authority</div>
+                  <strong>{authLabel(decision.holder_risk.freeze_authority_renounced)}</strong>
                 </div>
               </div>
 
@@ -238,8 +268,11 @@ export default function Home() {
 
               <p style={{ fontSize: "0.9rem" }}>
                 <strong>Price:</strong> ${decision.market?.price_usd} ·{" "}
-                <strong>Liq:</strong> ${Number(decision.market?.liquidity_usd || 0).toLocaleString()} ·{" "}
-                <strong>24h:</strong> {Number(decision.market?.price_change_h24 || 0).toFixed(1)}% ·{" "}
+                <strong>Liq:</strong> ${
+                  Number(decision.market?.liquidity_usd || 0).toLocaleString()
+                }{" "}
+                · <strong>24h:</strong>{" "}
+                {Number(decision.market?.price_change_h24 || 0).toFixed(1)}% ·{" "}
                 <strong>Buy ratio 1h:</strong>{" "}
                 {decision.market?.buy_ratio_h1 != null
                   ? `${(decision.market.buy_ratio_h1 * 100).toFixed(0)}%`
@@ -282,8 +315,7 @@ export default function Home() {
               </pre>
 
               <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "1rem" }}>
-                Paper trading only. Not financial advice. Always verify mint authority, LP lock,
-                and holders on Solscan / RugCheck.
+                Paper trading only. Not financial advice. Cross-check RugCheck / Solscan.
               </p>
             </div>
           )}
