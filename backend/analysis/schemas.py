@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
 class HolderRisk(BaseModel):
     score: int = Field(ge=0, le=100, description="Higher = safer")
+    top1_pct: Optional[float] = None
+    top5_pct: Optional[float] = None
     top10_pct: Optional[float] = None
+    top20_pct: Optional[float] = None
+    mint_authority_renounced: Optional[bool] = None
+    freeze_authority_renounced: Optional[bool] = None
+    helius_configured: bool = False
     flags: list[str] = []
     notes: str = ""
+    details: dict[str, Any] = {}
 
 
 class PositionSizing(BaseModel):
