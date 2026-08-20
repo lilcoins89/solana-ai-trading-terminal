@@ -17,30 +17,46 @@ from agents.roles import (
     _txn_pressure,
     _age_hours,
 )
-from analysis.schemas import Decision, HolderRisk, PositionSizing
+from analysis.schemas import CrossCheck, Decision, HolderRisk, PositionSizing
 
 
 def _clamp(x: float, lo: float = 0, hi: float = 100) -> int:
     return int(max(lo, min(hi, round(x))))
 
 
-def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -> Decision:
-    """Run the full agent pipeline on a normalized market snapshot + optional Helius data."""
+def run_analysis(
+    market: dict[str, Any],
+    helius: dict[str, Any] | None = None,
+    cross: dict[str, Any] | None = None,
+) -> Decision:
+    """Run agents on market + Helius + RugCheck/Solscan cross-check."""
 
     helius = helius or {"configured": False}
+    cross = cross or {}
+    rug = cross.get("rugcheck") or {}
+    solscan = cross.get("solscan") or {}
+
     holders = helius.get("holders") or {}
     authorities = helius.get("authorities") or {}
 
+    # Prefer RugCheck authorities if Helius missing
+    mint_ren = authorities.get("mint_authority_renounced")
+    freeze_ren = authorities.get("freeze_authority_renounced")
+    if mint_ren is None and rug.get("ok"):
+        mint_ren = rug.get("mint_authority_renounced")
+    if freeze_ren is None and rug.get("ok"):
+        freeze_ren = rug.get("freeze_authority_renounced")
+
     reports = {
         "technical": technical_analyst(market),
-        "onchain_risk": onchain_risk_analyst(market, helius),
+        "onchain_risk": onchain_risk_analyst(market, helius, cross),
         "sentiment": sentiment_analyst(market),
         "narrative": narrative_analyst(market),
     }
     reports["bull"] = bull_researcher(reports, market)
-    reports["bear"] = bear_researcher(reports, market, helius)
+    reports["bear"] = bear_researcher(reports, market, helius, cross)
     reports["trader"] = trader_agent(reports, market)
-    reports["risk"] = risk_manager(reports, market, helius)
+    reports["risk"] = risk_manager(reports, market, helius, cross)
 
     liq = float(market.get("liquidity_usd") or 0.0)
     vol = market.get("volume") or {}
@@ -54,15 +70,17 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
     price = float(market.get("price_usd") or 0.0)
     fdv = float(market.get("fdv") or market.get("market_cap") or 0.0)
     age_h = _age_hours(market.get("pair_created_at"))
-    buy_r1, buy_r24, tx_h1 = _txn_pressure(market.get("txns") or {})
+    buy_r1, _, tx_h1 = _txn_pressure(market.get("txns") or {})
     boosts = int((market.get("boosts") or {}).get("active") or 0)
 
     top1 = holders.get("top1_pct")
     top5 = holders.get("top5_pct")
     top10 = holders.get("top10_pct")
     top20 = holders.get("top20_pct")
-    mint_ren = authorities.get("mint_authority_renounced")
-    freeze_ren = authorities.get("freeze_authority_renounced")
+
+    lp_locked = rug.get("lp_locked_pct")
+    sniperish = bool(rug.get("sniper_or_insider_suspected"))
+    rug_flags = list(rug.get("flags") or [])
 
     # ---------- Liquidity score ----------
     if liq >= 1_000_000:
@@ -89,7 +107,6 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         elif ratio < 0.03:
             liq_score = max(5, liq_score - 10)
 
-    # ---------- Volume momentum ----------
     if vol24 > 1_500_000 and h1 > 5 and buy_r1 > 0.52:
         momentum: Literal["strong", "moderate", "weak", "dying"] = "strong"
     elif vol24 > 300_000 and (h1 > 0 or buy_r1 > 0.55):
@@ -99,7 +116,6 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
     else:
         momentum = "dying"
 
-    # ---------- Holder / structural risk (Helius-aware) ----------
     flags: list[str] = []
     holder_score = 55.0
 
@@ -126,12 +142,10 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
     if boosts > 0:
         flags.append("paid_boost")
         holder_score -= 5
-
     if h24 > 150:
         flags.append("extended_parabolic")
         holder_score -= 8
 
-    # Real concentration from Helius
     if top1 is not None:
         if top1 >= 40:
             flags.append("top1_extreme")
@@ -170,12 +184,34 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         flags.append("freeze_authority_active")
         holder_score -= 8
 
+    # RugCheck LP + sniper
+    if lp_locked is not None:
+        if lp_locked < 5:
+            flags.append("lp_unlocked")
+            holder_score -= 25
+        elif lp_locked < 50:
+            flags.append("lp_weak_lock")
+            holder_score -= 12
+        elif lp_locked >= 90:
+            flags.append("lp_strong_lock")
+            holder_score += 10
+        else:
+            holder_score += 4
+
+    if sniperish:
+        flags.append("sniper_or_insider_suspected")
+        holder_score -= 15
+
+    for f in rug_flags:
+        if f.startswith("danger_") or f in ("lp_mostly_unlocked",):
+            if f not in flags:
+                flags.append(f)
+
     if not helius.get("configured"):
         flags.append("helius_not_configured")
 
     holder_score = _clamp(holder_score, 5, 95)
 
-    # ---------- Social sentiment proxy ----------
     social: Literal["bullish", "neutral", "bearish", "unknown"] = "unknown"
     if h1 > 8 and buy_r1 >= 0.58 and tx_h1 >= 25:
         social = "bullish"
@@ -184,22 +220,24 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
     elif tx_h1 >= 15:
         social = "neutral"
 
-    # ---------- Composite edge ----------
     edge = 40.0
     edge += min(20, h1 * 0.8) if h1 > 0 else max(-20, h1 * 0.6)
     edge += 12 if momentum == "strong" else 6 if momentum == "moderate" else -5 if momentum == "dying" else 0
     edge += (buy_r1 - 0.5) * 40
     edge += (liq_score - 50) * 0.25
-    edge += (holder_score - 50) * 0.35  # stronger weight when Helius data present
+    edge += (holder_score - 50) * 0.35
     if age_h is not None and age_h < 2:
         edge -= 12
     if h24 > 120:
         edge -= 10
     if m5 > 15:
         edge -= 6
+    if lp_locked is not None and lp_locked < 10:
+        edge -= 12
+    if sniperish:
+        edge -= 8
     edge = _clamp(edge, 0, 100)
 
-    # ---------- Action ----------
     action: Literal["BUY", "WATCH", "AVOID"] = "AVOID"
     confidence = 50
 
@@ -212,6 +250,8 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         or "top1_extreme" in flags
         or "top10_extreme" in flags
         or (mint_ren is False and liq < 100_000)
+        or (lp_locked is not None and lp_locked < 5 and liq < 200_000)
+        or (sniperish and lp_locked is not None and lp_locked < 50)
     )
 
     if hard_avoid:
@@ -224,6 +264,8 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         and holder_score >= 50
         and (top10 is None or top10 < 55)
         and mint_ren is not False
+        and (lp_locked is None or lp_locked >= 50)
+        and not sniperish
     ):
         action = "BUY"
         confidence = _clamp(55 + (edge - 68) * 0.7)
@@ -241,7 +283,6 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         action = "AVOID"
         confidence = max(confidence, 72)
 
-    # ---------- Sizing ----------
     if action == "BUY":
         pct = 0.75 if liq > 250_000 and holder_score > 55 else 0.35
         max_usd = min(200.0, liq * 0.008)
@@ -276,10 +317,32 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         if ln.strip()
     ]
 
-    helius_note = (
-        "Helius enrichment active (holders + authorities)."
-        if helius.get("configured")
-        else "Helius not configured — add HELIUS_API_KEY for holder concentration & authorities."
+    links = {}
+    links.update((rug.get("links") or {}))
+    links.update((solscan.get("links") or {}))
+
+    cross_check = CrossCheck(
+        lp_locked_pct=lp_locked,
+        rugcheck_score=float(rug["score"]) if rug.get("score") is not None else None,
+        rugcheck_score_normalised=(
+            float(rug["score_normalised"]) if rug.get("score_normalised") is not None else None
+        ),
+        sniper_or_insider_suspected=sniperish,
+        risks=list(rug.get("risks") or [])[:12],
+        flags=list(dict.fromkeys(flags + rug_flags)),
+        links=links,
+        rugcheck_ok=bool(rug.get("ok")),
+        notes=(
+            f"LP locked ~{lp_locked}% (RugCheck). "
+            if lp_locked is not None
+            else "LP lock % unavailable from RugCheck. "
+        )
+        + (
+            "Sniper/insider signals detected in RugCheck risks — verify first buyers on Solscan. "
+            if sniperish
+            else "No explicit sniper/insider risk names in RugCheck summary. Still verify early holders on Solscan. "
+        )
+        + "Links included for manual cross-check.",
     )
 
     explanation = "\n\n".join(
@@ -293,9 +356,11 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
             reports["trader"],
             reports["risk"],
             f"Composite edge score: {edge}/100",
-            helius_note,
+            f"RugCheck LP locked: {lp_locked if lp_locked is not None else 'n/a'}% | "
+            f"sniper/insider suspected: {sniperish}",
+            f"Cross-check: {links.get('rugcheck', '')} | {links.get('solscan_holders') or links.get('solscan', '')}",
             f"Final decision: {action} (confidence {confidence}%).",
-            "Heuristic multi-agent system for research only. Not financial advice. DYOR.",
+            "Research only. Not financial advice. DYOR.",
         ]
     )
 
@@ -317,18 +382,18 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
             helius_configured=bool(helius.get("configured")),
             flags=flags,
             notes=(
-                "Holder concentration from Helius getTokenLargestAccounts; "
-                "authorities from DAS getAsset. Always cross-check RugCheck/Solscan."
-                if helius.get("configured")
-                else "Structural proxies only. Set HELIUS_API_KEY for real holder data."
+                "Helius holders + RugCheck LP/risks + Solscan links. "
+                "Always open Solscan holders/transfers for sniper verification."
             ),
             details={
                 "largest_accounts": (holders.get("largest_accounts") or [])[:10],
-                "mint_authority": authorities.get("mint_authority"),
-                "freeze_authority": authorities.get("freeze_authority"),
+                "mint_authority": authorities.get("mint_authority") or rug.get("mint_authority"),
+                "freeze_authority": authorities.get("freeze_authority") or rug.get("freeze_authority"),
                 "supply_ui": holders.get("supply_ui"),
+                "lp_locked_pct": lp_locked,
             },
         ),
+        cross_check=cross_check,
         social_sentiment=social,
         technical_signals=tech_lines,
         entry_zone={"low": entry_low, "high": entry_high},
@@ -337,10 +402,7 @@ def run_analysis(market: dict[str, Any], helius: dict[str, Any] | None = None) -
         position_sizing=PositionSizing(
             pct_of_portfolio=pct,
             max_usd=round(max_usd, 2),
-            rationale=(
-                "Micro-size only. Cap by % of portfolio and % of pool liquidity. "
-                "Never size for a home-run on new Solana pairs."
-            ),
+            rationale="Micro-size only. Cap vs pool liquidity.",
         ),
         risk_reward=rr,
         explanation=explanation,
