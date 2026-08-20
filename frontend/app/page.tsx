@@ -13,36 +13,30 @@ type Decision = {
   holder_risk: {
     score: number;
     top1_pct?: number | null;
-    top5_pct?: number | null;
     top10_pct?: number | null;
-    top20_pct?: number | null;
     mint_authority_renounced?: boolean | null;
     freeze_authority_renounced?: boolean | null;
     helius_configured?: boolean;
     flags: string[];
-    notes: string;
+  };
+  cross_check?: {
+    lp_locked_pct?: number | null;
+    sniper_or_insider_suspected?: boolean;
+    rugcheck_ok?: boolean;
+    risks?: { name?: string; level?: string }[];
+    links?: Record<string, string>;
+    notes?: string;
   };
   social_sentiment: string;
   technical_signals: string[];
   entry_zone: { low?: number; high?: number };
   stop_loss?: number;
   take_profit: number[];
-  position_sizing: { pct_of_portfolio: number; max_usd: number; rationale: string };
+  position_sizing: { pct_of_portfolio: number; max_usd: number };
   risk_reward?: number;
   explanation: string;
   token: { address?: string; name?: string; symbol?: string };
-  market: {
-    price_usd?: number;
-    liquidity_usd?: number;
-    volume_h24?: number;
-    price_change_h1?: number;
-    price_change_h24?: number;
-    buy_ratio_h1?: number;
-    age_hours?: number;
-    dex_id?: string;
-    url?: string;
-  };
-  timestamp: string;
+  market: any;
 };
 
 function authLabel(v?: boolean | null) {
@@ -71,8 +65,7 @@ export default function Home() {
       }
       const r = await fetch(`${API}/tokens/search?q=${encodeURIComponent(query)}&limit=12`);
       if (!r.ok) throw new Error("Search failed — is the backend running?");
-      const data = await r.json();
-      setSearchResults(data);
+      setSearchResults(await r.json());
     } catch (e: any) {
       setError(e.message || "Search error");
     } finally {
@@ -86,12 +79,8 @@ export default function Home() {
     setDecision(null);
     try {
       const r = await fetch(`${API}/analyze/${address}`);
-      if (!r.ok) {
-        const t = await r.text();
-        throw new Error(t || "Analysis failed");
-      }
-      const data = await r.json();
-      setDecision(data);
+      if (!r.ok) throw new Error((await r.text()) || "Analysis failed");
+      setDecision(await r.json());
     } catch (e: any) {
       setError(e.message || "Analysis error");
     } finally {
@@ -101,6 +90,7 @@ export default function Home() {
 
   const actionClass =
     decision?.action === "BUY" ? "buy" : decision?.action === "WATCH" ? "watch" : "avoid";
+  const cc = decision?.cross_check;
 
   return (
     <main style={{ maxWidth: 1140, margin: "0 auto", padding: "1.5rem" }}>
@@ -117,7 +107,7 @@ export default function Home() {
         <div>
           <h1 style={{ margin: 0, fontSize: "1.5rem" }}>Solana AI Trading Terminal</h1>
           <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-            Multi-agent · Helius · v0.3 · Paper mode · Educational only
+            Multi-agent · Helius · RugCheck · Solscan · v0.4 · Paper only
           </p>
         </div>
         <WalletMultiButton />
@@ -126,7 +116,7 @@ export default function Home() {
       <div className="card" style={{ marginBottom: "1rem" }}>
         <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
           <input
-            placeholder="Search name/symbol or paste mint address..."
+            placeholder="Search name/symbol or paste mint..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && doSearch()}
@@ -136,9 +126,6 @@ export default function Home() {
             {loading ? "Working..." : "Search / Analyze"}
           </button>
         </div>
-        <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.75rem" }}>
-          API: {API} · Set HELIUS_API_KEY for holder concentration · Real trading off
-        </p>
       </div>
 
       {error && (
@@ -151,28 +138,20 @@ export default function Home() {
         <section className="card">
           <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>Search Results</h2>
           {searchResults.length === 0 && (
-            <p style={{ color: "var(--muted)" }}>
-              Search a Solana token, or paste a mint and hit Analyze.
-            </p>
+            <p style={{ color: "var(--muted)" }}>Search or paste a mint to analyze.</p>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
             {searchResults.map((p) => (
               <button
                 key={p.pair_address}
                 onClick={() => analyze(p.base_token?.address)}
-                style={{
-                  textAlign: "left",
-                  background: "#0f172a",
-                  border: "1px solid var(--border)",
-                }}
+                style={{ textAlign: "left", background: "#0f172a", border: "1px solid var(--border)" }}
               >
                 <strong>
                   {p.base_token?.symbol} / {p.quote_token?.symbol}
                 </strong>{" "}
                 <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
-                  · Liq ${Number(p.liquidity_usd || 0).toLocaleString()} · Vol $
-                  {Number(p.volume?.h24 || 0).toLocaleString()} ·{" "}
-                  {Number(p.price_change?.h24 || 0).toFixed(1)}% 24h
+                  · Liq ${Number(p.liquidity_usd || 0).toLocaleString()}
                 </span>
               </button>
             ))}
@@ -181,115 +160,83 @@ export default function Home() {
 
         <section className="card">
           <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>AI Analysis</h2>
-          {!decision && (
-            <p style={{ color: "var(--muted)" }}>
-              Select a token to run Technical · Risk · Sentiment · Narrative · Bull/Bear ·
-              Trader · Risk Manager (+ Helius holders).
-            </p>
-          )}
+          {!decision && <p style={{ color: "var(--muted)" }}>Select a token to run the full pipeline.</p>}
           {decision && (
             <div>
-              <div
-                style={{
-                  display: "flex",
-                  gap: "0.75rem",
-                  alignItems: "center",
-                  marginBottom: "1rem",
-                  flexWrap: "wrap",
-                }}
-              >
+              <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
                 <span className={`badge ${actionClass}`}>{decision.action}</span>
                 <span>
                   Confidence <strong>{decision.confidence}%</strong>
                 </span>
                 <span style={{ color: "var(--muted)" }}>
-                  {decision.token.symbol} · {decision.token.name}
+                  {decision.token.symbol}
                 </span>
-                {decision.market?.url && (
-                  <a href={decision.market.url} target="_blank" rel="noreferrer">
-                    DexScreener ↗
-                  </a>
-                )}
               </div>
 
-              <div
-                className="grid"
-                style={{ gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "1rem" }}
-              >
+              <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Liquidity Score</div>
-                  <strong>{decision.liquidity_score}/100</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Volume Momentum</div>
-                  <strong>{decision.volume_momentum}</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Holder Risk</div>
-                  <strong>{decision.holder_risk.score}/100</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Social Sentiment</div>
-                  <strong>{decision.social_sentiment}</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Top-10 holders</div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>LP locked (RugCheck)</div>
                   <strong>
-                    {decision.holder_risk.top10_pct != null
-                      ? `${decision.holder_risk.top10_pct}%`
-                      : decision.holder_risk.helius_configured
-                        ? "—"
-                        : "Set Helius key"}
+                    {cc?.lp_locked_pct != null ? `${cc.lp_locked_pct}%` : "n/a"}
                   </strong>
                 </div>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Top-1 holder</div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Sniper / insider</div>
+                  <strong>{cc?.sniper_or_insider_suspected ? "Suspected ⚠" : "Not flagged"}</strong>
+                </div>
+                <div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Holder risk</div>
+                  <strong>{decision.holder_risk.score}/100</strong>
+                </div>
+                <div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Top-10</div>
                   <strong>
-                    {decision.holder_risk.top1_pct != null
-                      ? `${decision.holder_risk.top1_pct}%`
+                    {decision.holder_risk.top10_pct != null
+                      ? `${decision.holder_risk.top10_pct}%`
                       : "—"}
                   </strong>
                 </div>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Mint authority</div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Mint auth</div>
                   <strong>{authLabel(decision.holder_risk.mint_authority_renounced)}</strong>
                 </div>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Freeze authority</div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Freeze auth</div>
                   <strong>{authLabel(decision.holder_risk.freeze_authority_renounced)}</strong>
                 </div>
               </div>
 
-              {decision.holder_risk.flags?.length > 0 && (
-                <p style={{ fontSize: "0.85rem" }}>
-                  <strong>Flags:</strong> {decision.holder_risk.flags.join(", ")}
-                </p>
-              )}
-
-              <p style={{ fontSize: "0.9rem" }}>
-                <strong>Price:</strong> ${decision.market?.price_usd} ·{" "}
-                <strong>Liq:</strong> ${
-                  Number(decision.market?.liquidity_usd || 0).toLocaleString()
-                }{" "}
-                · <strong>24h:</strong>{" "}
-                {Number(decision.market?.price_change_h24 || 0).toFixed(1)}% ·{" "}
-                <strong>Buy ratio 1h:</strong>{" "}
-                {decision.market?.buy_ratio_h1 != null
-                  ? `${(decision.market.buy_ratio_h1 * 100).toFixed(0)}%`
-                  : "—"}
-                <br />
-                <strong>Entry zone:</strong>{" "}
-                {decision.entry_zone.low?.toPrecision(6)} –{" "}
-                {decision.entry_zone.high?.toPrecision(6)}
-                <br />
-                <strong>Stop-loss:</strong> {decision.stop_loss?.toPrecision(6) ?? "—"}
-                <br />
-                <strong>Take-profit:</strong>{" "}
-                {decision.take_profit.map((t) => t.toPrecision(6)).join(" / ") || "—"}
-                <br />
-                <strong>Max size:</strong> ${decision.position_sizing.max_usd} (
-                {decision.position_sizing.pct_of_portfolio}% portfolio)
+              <p style={{ fontSize: "0.9rem", marginTop: "0.75rem" }}>
+                {cc?.links?.rugcheck && (
+                  <>
+                    <a href={cc.links.rugcheck} target="_blank" rel="noreferrer">
+                      RugCheck ↗
+                    </a>{" "}
+                  </>
+                )}
+                {(cc?.links?.solscan_holders || cc?.links?.solscan) && (
+                  <a
+                    href={cc.links.solscan_holders || cc.links.solscan}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Solscan holders ↗
+                  </a>
+                )}
               </p>
+
+              {cc?.risks && cc.risks.length > 0 && (
+                <>
+                  <h3 style={{ fontSize: "0.95rem" }}>RugCheck risks</h3>
+                  <ul style={{ marginTop: 0 }}>
+                    {cc.risks.slice(0, 6).map((r, i) => (
+                      <li key={i}>
+                        [{r.level}] {r.name}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
 
               <h3 style={{ fontSize: "0.95rem" }}>Technical signals</h3>
               <ul style={{ marginTop: 0 }}>
@@ -307,16 +254,12 @@ export default function Home() {
                   background: "#0f172a",
                   padding: "0.75rem",
                   borderRadius: 8,
-                  maxHeight: 340,
+                  maxHeight: 320,
                   overflow: "auto",
                 }}
               >
                 {decision.explanation}
               </pre>
-
-              <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "1rem" }}>
-                Paper trading only. Not financial advice. Cross-check RugCheck / Solscan.
-              </p>
             </div>
           )}
         </section>
