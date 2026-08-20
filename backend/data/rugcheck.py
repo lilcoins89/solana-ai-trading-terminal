@@ -1,15 +1,8 @@
-"""
-RugCheck.xyz client for Solana token risk cross-checks.
-
-Public endpoints (no key required for basic use):
-  GET https://api.rugcheck.xyz/v1/tokens/{mint}/report
-  GET https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary
-
-Optional RUGCHECK_API_KEY / X-API-KEY for higher rate limits.
-"""
+"""RugCheck.xyz client — LP lock, risks, sniper/insider signals."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
@@ -17,9 +10,6 @@ from typing import Any
 import httpx
 
 BASE = "https://api.rugcheck.xyz/v1"
-RUGCHECK_API_KEY = os.getenv("RUGCHECK_API_KEY", "").strip()
-
-# Risk name patterns that imply sniper / insider / bundle behavior
 _SNIPER_RE = re.compile(
     r"sniper|snipe|bundle|bundler|insider|wash|sybil|fresh.?wallet|dev.?hold", re.I
 )
@@ -27,8 +17,9 @@ _SNIPER_RE = re.compile(
 
 def _headers() -> dict[str, str]:
     h = {"Accept": "application/json"}
-    if RUGCHECK_API_KEY:
-        h["X-API-KEY"] = RUGCHECK_API_KEY
+    key = os.getenv("RUGCHECK_API_KEY", "").strip()
+    if key:
+        h["X-API-KEY"] = key
     return h
 
 
@@ -64,17 +55,14 @@ def _extract_lp_locked_pct(report: dict, summary: dict | None) -> float | None:
             return float(summary["lpLockedPct"])
         except (TypeError, ValueError):
             pass
-    # Full report markets often include LP lock info
-    markets = report.get("markets") or []
     locked_pcts: list[float] = []
-    for m in markets:
+    for m in report.get("markets") or []:
         for key in ("lpLockedPct", "lp_locked_pct", "lockedPct"):
             if m.get(key) is not None:
                 try:
                     locked_pcts.append(float(m[key]))
                 except (TypeError, ValueError):
                     pass
-        # Some reports nest lp under market
         lp = m.get("lp") or {}
         if isinstance(lp, dict) and lp.get("lpLockedPct") is not None:
             try:
@@ -92,7 +80,6 @@ def _extract_lp_locked_pct(report: dict, summary: dict | None) -> float | None:
 
 
 def _parse_risks(risks: list) -> tuple[list[dict[str, Any]], list[str], bool]:
-    """Return (normalized risks, flag names, sniper_or_insider_suspected)."""
     out: list[dict[str, Any]] = []
     flags: list[str] = []
     sniperish = False
@@ -114,13 +101,41 @@ def _parse_risks(risks: list) -> tuple[list[dict[str, Any]], list[str], bool]:
         slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
         if slug:
             flags.append(f"rugcheck_{slug}")
-        blob = f"{name} {desc}"
-        if _SNIPER_RE.search(blob):
+        if _SNIPER_RE.search(f"{name} {desc}"):
             sniperish = True
             flags.append("sniper_or_insider_signal")
         if level.lower() in ("danger", "critical", "high"):
             flags.append(f"danger_{slug}" if slug else "danger_risk")
-    # dedupe flags
+    return list(dict.fromkeys(flags)), out, sniperish  # type: ignore[return-value]
+
+
+def _parse_risks_fixed(risks: list) -> tuple[list[dict[str, Any]], list[str], bool]:
+    out: list[dict[str, Any]] = []
+    flags: list[str] = []
+    sniperish = False
+    for r in risks or []:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name") or "")
+        level = str(r.get("level") or r.get("severity") or "warn")
+        desc = str(r.get("description") or "")
+        out.append(
+            {
+                "name": name,
+                "level": level,
+                "description": desc,
+                "value": r.get("value"),
+                "score": r.get("score"),
+            }
+        )
+        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+        if slug:
+            flags.append(f"rugcheck_{slug}")
+        if _SNIPER_RE.search(f"{name} {desc}"):
+            sniperish = True
+            flags.append("sniper_or_insider_signal")
+        if level.lower() in ("danger", "critical", "high"):
+            flags.append(f"danger_{slug}" if slug else "danger_risk")
     flags = list(dict.fromkeys(flags))
     return out, flags, sniperish
 
@@ -148,17 +163,11 @@ def _top_holders_from_report(report: dict) -> list[dict[str, Any]]:
 
 
 async def enrich_rugcheck(mint: str) -> dict[str, Any]:
-    """
-    Normalized RugCheck enrichment for the analysis pipeline.
-    Always includes explorer links for human cross-check.
-    """
-    report = await get_report(mint)
-    summary = await get_summary(mint)
+    report, summary = await asyncio.gather(get_report(mint), get_summary(mint))
 
-    # Prefer summary if report failed
     if not report and not summary:
         return {
-            "configured": True,  # public API — always "available"
+            "configured": True,
             "ok": False,
             "error": "RugCheck report unavailable",
             "lp_locked_pct": None,
@@ -171,16 +180,12 @@ async def enrich_rugcheck(mint: str) -> dict[str, Any]:
             "links": {
                 "rugcheck": f"https://rugcheck.xyz/tokens/{mint}",
                 "solscan": f"https://solscan.io/token/{mint}",
+                "solscan_holders": f"https://solscan.io/token/{mint}#holders",
             },
         }
 
-    risks_raw = []
-    if report:
-        risks_raw = report.get("risks") or []
-    if not risks_raw and summary:
-        risks_raw = summary.get("risks") or []
-
-    risks, flags, sniperish = _parse_risks(risks_raw)
+    risks_raw = (report or {}).get("risks") or (summary or {}).get("risks") or []
+    risks, flags, sniperish = _parse_risks_fixed(risks_raw)
     lp_pct = _extract_lp_locked_pct(report or {}, summary)
 
     score = None
@@ -190,7 +195,9 @@ async def enrich_rugcheck(mint: str) -> dict[str, Any]:
         score_norm = summary.get("score_normalised") or summary.get("scoreNormalized")
     if report:
         score = score if score is not None else report.get("score")
-        score_norm = score_norm if score_norm is not None else report.get("score_normalised")
+        score_norm = (
+            score_norm if score_norm is not None else report.get("score_normalised")
+        )
 
     if lp_pct is not None:
         if lp_pct < 10:
@@ -200,7 +207,6 @@ async def enrich_rugcheck(mint: str) -> dict[str, Any]:
         else:
             flags.append("lp_majority_locked")
 
-    # token authorities from report if present
     token = (report or {}).get("token") or {}
     mint_auth = token.get("mintAuthority")
     freeze_auth = token.get("freezeAuthority")
