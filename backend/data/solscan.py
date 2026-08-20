@@ -1,9 +1,4 @@
-"""
-Solscan cross-check helpers.
-
-Always provides human explorer links. Optional SOLSCAN_API_KEY enables
-Pro API token holders (limited sniper proxy via holder list labels when present).
-"""
+"""Solscan explorer links + optional Pro holders API."""
 
 from __future__ import annotations
 
@@ -12,8 +7,11 @@ from typing import Any
 
 import httpx
 
-SOLSCAN_API_KEY = os.getenv("SOLSCAN_API_KEY", "").strip()
 PRO_BASE = "https://pro-api.solscan.io/v2.0"
+
+
+def _api_key() -> str:
+    return os.getenv("SOLSCAN_API_KEY", "").strip()
 
 
 def explorer_links(mint: str, pair_address: str | None = None) -> dict[str, str]:
@@ -28,19 +26,15 @@ def explorer_links(mint: str, pair_address: str | None = None) -> dict[str, str]
 
 
 async def get_top_holders_pro(mint: str, page_size: int = 20) -> dict[str, Any]:
-    """Optional Solscan Pro holders. Returns empty if no API key."""
-    if not SOLSCAN_API_KEY:
-        return {
-            "configured": False,
-            "holders": [],
-            "error": "SOLSCAN_API_KEY not set",
-        }
+    key = _api_key()
+    if not key:
+        return {"configured": False, "holders": [], "error": "SOLSCAN_API_KEY not set"}
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             r = await client.get(
                 f"{PRO_BASE}/token/holders",
                 params={"address": mint, "page": 1, "page_size": page_size},
-                headers={"token": SOLSCAN_API_KEY, "accept": "application/json"},
+                headers={"token": key, "accept": "application/json"},
             )
             if r.status_code >= 400:
                 return {
@@ -75,8 +69,5 @@ async def enrich_solscan(mint: str, pair_address: str | None = None) -> dict[str
     return {
         "links": links,
         "pro_holders": pro,
-        "note": (
-            "Use Solscan holders + transfers tabs to manually verify early buyers / snipers. "
-            "Pro API key optional for programmatic top holders."
-        ),
+        "note": "Verify early buyers on Solscan holders/transfers tabs.",
     }
