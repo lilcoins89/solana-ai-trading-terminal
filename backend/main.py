@@ -31,17 +31,18 @@ from data.dexscreener import (
     latest_token_profiles,
 )
 from data.helius import enrich_token, helius_configured, get_holder_concentration, get_token_authorities
+from data.rugcheck import enrich_rugcheck, get_report, get_summary
+from data.solscan import enrich_solscan
 from analysis.pipeline import run_analysis
 from analysis.schemas import Decision
 
 app = FastAPI(
     title="Solana AI Trading Terminal",
     description=(
-        "Multi-agent Solana token analysis inspired by TradingAgents. "
-        "Helius-powered holder concentration & authorities. "
-        "Paper trading only by default. Educational / research use."
+        "Multi-agent Solana analysis: DexScreener + Helius + RugCheck LP/snipers + Solscan links. "
+        "Paper trading only by default."
     ),
-    version="0.3.0",
+    version="0.4.0",
 )
 
 app.add_middleware(
@@ -57,14 +58,21 @@ _paper_trades: list[dict] = []
 _paper_positions: dict[str, dict] = {}
 
 
+async def _cross_enrich(mint: str, pair_address: str | None = None) -> dict:
+    rug = await enrich_rugcheck(mint)
+    sol = await enrich_solscan(mint, pair_address)
+    return {"rugcheck": rug, "solscan": sol}
+
+
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "mode": "paper",
         "real_trading": False,
         "helius_configured": helius_configured(),
+        "rugcheck": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -74,13 +82,13 @@ async def helius_status():
     return {
         "configured": helius_configured(),
         "features": [
-            "getTokenLargestAccounts (top holder concentration)",
+            "getTokenLargestAccounts",
             "getTokenSupply",
             "getAsset DAS (mint/freeze authority)",
         ],
         "hint": None
         if helius_configured()
-        else "Set HELIUS_API_KEY in backend/.env — free key at https://dashboard.helius.dev",
+        else "Set HELIUS_API_KEY — https://dashboard.helius.dev",
     }
 
 
@@ -114,7 +122,8 @@ async def analyze_token(token_address: str):
     market = await _best_market(token_address)
     mint = (market.get("base_token") or {}).get("address") or token_address
     helius = await enrich_token(mint)
-    return run_analysis(market, helius)
+    cross = await _cross_enrich(mint, market.get("pair_address"))
+    return run_analysis(market, helius, cross)
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -123,14 +132,14 @@ class BatchAnalyzeRequest(BaseModel):
 
 @app.post("/analyze/batch")
 async def analyze_batch(req: BatchAnalyzeRequest):
-    """Analyze up to 10 tokens with Helius enrichment."""
     results = []
     for addr in req.addresses[:10]:
         try:
             market = await _best_market(addr.strip())
             mint = (market.get("base_token") or {}).get("address") or addr.strip()
             helius = await enrich_token(mint)
-            results.append(run_analysis(market, helius).model_dump())
+            cross = await _cross_enrich(mint, market.get("pair_address"))
+            results.append(run_analysis(market, helius, cross).model_dump())
         except Exception as e:
             results.append({"token": {"address": addr}, "error": str(e)})
     return {"count": len(results), "results": results}
@@ -141,31 +150,44 @@ async def market_snapshot(token_address: str):
     return await _best_market(token_address)
 
 
+@app.get("/crosscheck/{token_address}")
+async def crosscheck(token_address: str):
+    """Raw RugCheck + Solscan enrichment for a mint."""
+    market = None
+    try:
+        market = await _best_market(token_address)
+    except Exception:
+        pass
+    mint = token_address
+    if market:
+        mint = (market.get("base_token") or {}).get("address") or token_address
+    return await _cross_enrich(mint, (market or {}).get("pair_address"))
+
+
+@app.get("/rugcheck/{token_address}")
+async def rugcheck_report(token_address: str, summary: bool = False):
+    if summary:
+        data = await get_summary(token_address)
+    else:
+        data = await get_report(token_address)
+    if not data:
+        raise HTTPException(404, "RugCheck report not found")
+    return data
+
+
 @app.get("/helius/holders/{token_address}")
 async def helius_holders(token_address: str):
-    """Raw Helius top-holder concentration for a mint."""
     if not helius_configured():
-        raise HTTPException(
-            503,
-            "HELIUS_API_KEY not configured. Add it to backend/.env",
-        )
+        raise HTTPException(503, "HELIUS_API_KEY not configured")
     return await get_holder_concentration(token_address)
 
 
 @app.get("/helius/authorities/{token_address}")
 async def helius_authorities(token_address: str):
-    """Mint / freeze authority status via Helius DAS getAsset."""
     if not helius_configured():
-        raise HTTPException(
-            503,
-            "HELIUS_API_KEY not configured. Add it to backend/.env",
-        )
+        raise HTTPException(503, "HELIUS_API_KEY not configured")
     return await get_token_authorities(token_address)
 
-
-# ---------------------------------------------------------------------------
-# Paper trading
-# ---------------------------------------------------------------------------
 
 class PaperTradeRequest(BaseModel):
     token_address: str
@@ -178,11 +200,10 @@ class PaperTradeRequest(BaseModel):
 
 @app.get("/paper/summary")
 async def paper_summary():
-    positions = list(_paper_positions.values())
     return {
         "cash_usd": round(_paper_balance, 4),
-        "open_positions": len(positions),
-        "positions": positions,
+        "open_positions": len(_paper_positions),
+        "positions": list(_paper_positions.values()),
         "trade_count": len(_paper_trades),
         "starting_balance": 10_000.0,
     }
@@ -266,12 +287,7 @@ async def paper_trade(req: PaperTradeRequest):
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     _paper_trades.append(trade)
-    return {
-        "ok": True,
-        "trade": trade,
-        "balance_usd": _paper_balance,
-        "positions": list(_paper_positions.values()),
-    }
+    return {"ok": True, "trade": trade, "balance_usd": _paper_balance, "positions": list(_paper_positions.values())}
 
 
 @app.post("/paper/reset")
