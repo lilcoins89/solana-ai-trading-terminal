@@ -49,7 +49,6 @@ def technical_analyst(market: dict[str, Any]) -> str:
 
     buy_r1, buy_r24, tx_h1 = _txn_pressure(txns)
 
-    # Momentum structure
     if h1 > 20 and h6 > 10:
         signals.append(f"Strong multi-timeframe momentum (1h {h1:+.1f}%, 6h {h6:+.1f}%)")
     elif h1 > 10:
@@ -68,7 +67,6 @@ def technical_analyst(market: dict[str, Any]) -> str:
     elif h24 < -40:
         signals.append(f"Severe 24h drawdown ({h24:+.1f}%)")
 
-    # Volume quality
     if v24 > 1_000_000 and v1 > 80_000:
         signals.append(f"High-quality volume (24h ${v24:,.0f}, 1h ${v1:,.0f})")
     elif v24 > 250_000:
@@ -79,7 +77,6 @@ def technical_analyst(market: dict[str, Any]) -> str:
     if v1 > 0 and v6 > 0 and v1 > (v6 / 6) * 2.5:
         signals.append("Volume accelerating vs 6h average")
 
-    # Order-flow proxy
     if buy_r1 >= 0.62 and tx_h1 >= 40:
         signals.append(f"Buy-side dominance 1h ({buy_r1*100:.0f}% buys, {tx_h1:.0f} tx)")
     elif buy_r1 <= 0.38 and tx_h1 >= 40:
@@ -96,12 +93,11 @@ def technical_analyst(market: dict[str, Any]) -> str:
     return "Technical Analyst Report:\n- " + "\n- ".join(signals)
 
 
-def onchain_risk_analyst(market: dict[str, Any]) -> str:
+def onchain_risk_analyst(market: dict[str, Any], helius: dict[str, Any] | None = None) -> str:
     liq = float(market.get("liquidity_usd") or 0)
     fdv = float(market.get("fdv") or market.get("market_cap") or 0)
     age_h = _age_hours(market.get("pair_created_at"))
     flags: list[str] = []
-    score_hints: list[str] = []
 
     if liq < 3_000:
         flags.append("CRITICAL liquidity (<$3k) — near-certain exit difficulty / rug risk")
@@ -111,10 +107,8 @@ def onchain_risk_analyst(market: dict[str, Any]) -> str:
         flags.append("Low liquidity (<$30k) — size carefully")
     elif liq < 100_000:
         flags.append("Moderate liquidity")
-        score_hints.append("tradeable_micro")
     else:
         flags.append(f"Healthy liquidity (${liq:,.0f})")
-        score_hints.append("tradeable")
 
     if fdv > 0 and liq > 0:
         ratio = liq / fdv
@@ -136,12 +130,52 @@ def onchain_risk_analyst(market: dict[str, Any]) -> str:
             flags.append(f"Establishing pair ({age_h:.0f}h old)")
         else:
             flags.append(f"Mature pair ({age_h/24:.1f}d)")
-            score_hints.append("aged")
 
-    flags.append(
-        "Reminder: mint authority, freeze authority, LP lock %, top-10 holder concentration "
-        "and sniper/bundle detection require Helius / Birdeye / RugCheck. Always verify."
-    )
+    # ----- Helius enrichment -----
+    helius = helius or {}
+    holders = helius.get("holders") or {}
+    authorities = helius.get("authorities") or {}
+
+    if helius.get("configured"):
+        top1 = holders.get("top1_pct")
+        top10 = holders.get("top10_pct")
+        top20 = holders.get("top20_pct")
+        if top10 is not None:
+            flags.append(
+                f"Holder concentration (Helius): top1={top1}% · top10={top10}% · top20={top20}%"
+            )
+            if top1 is not None and top1 >= 30:
+                flags.append("CRITICAL: single wallet holds ≥30% of supply")
+            elif top1 is not None and top1 >= 15:
+                flags.append("High concentration: top wallet ≥15%")
+            if top10 is not None and top10 >= 70:
+                flags.append("CRITICAL: top-10 wallets control ≥70% — extreme dump risk")
+            elif top10 is not None and top10 >= 50:
+                flags.append("Elevated concentration: top-10 ≥50%")
+        elif holders.get("error"):
+            flags.append(f"Helius holders: {holders.get('error')}")
+
+        mint_ren = authorities.get("mint_authority_renounced")
+        freeze_ren = authorities.get("freeze_authority_renounced")
+        if mint_ren is True:
+            flags.append("Mint authority RENNOUNCED (good)")
+        elif mint_ren is False:
+            flags.append(
+                f"Mint authority ACTIVE ({authorities.get('mint_authority')}) — can mint more supply"
+            )
+        if freeze_ren is True:
+            flags.append("Freeze authority RENNOUNCED (good)")
+        elif freeze_ren is False:
+            flags.append(
+                f"Freeze authority ACTIVE ({authorities.get('freeze_authority')}) — accounts can be frozen"
+            )
+        if authorities.get("error") and mint_ren is None:
+            flags.append(f"Helius authorities: {authorities.get('error')}")
+    else:
+        flags.append(
+            "Helius not configured — set HELIUS_API_KEY for real holder concentration "
+            "and mint/freeze authority checks."
+        )
 
     return "On-chain / Holder Risk Analyst Report:\n- " + "\n- ".join(flags)
 
@@ -168,7 +202,6 @@ def sentiment_analyst(market: dict[str, Any]) -> str:
     else:
         notes.append("No active paid boosts detected")
 
-    # Soft sentiment proxy from order flow + price
     pc = market.get("price_change") or {}
     h1 = float(pc.get("h1") or 0)
     txns = market.get("txns") or {}
@@ -198,7 +231,6 @@ def narrative_analyst(market: dict[str, Any]) -> str:
     if labels:
         notes.append(f"DexScreener labels: {', '.join(str(l) for l in labels)}")
 
-    # Simple narrative heuristics from name/symbol (very rough)
     blob = f"{name} {symbol}".lower()
     if any(k in blob for k in ("ai", "agent", "gpt", "llm")):
         notes.append("Narrative hint: AI / agent theme (crowded sector — high competition)")
@@ -235,16 +267,17 @@ def bull_researcher(reports: dict[str, str], market: dict[str, Any]) -> str:
     )
 
 
-def bear_researcher(reports: dict[str, str], market: dict[str, Any]) -> str:
+def bear_researcher(reports: dict[str, str], market: dict[str, Any], helius: dict[str, Any] | None = None) -> str:
     liq = float(market.get("liquidity_usd") or 0)
     age_h = _age_hours(market.get("pair_created_at"))
     boosts = int((market.get("boosts") or {}).get("active") or 0)
     pc = market.get("price_change") or {}
     h24 = float(pc.get("h24") or 0)
+    helius = helius or {}
+    holders = helius.get("holders") or {}
+    authorities = helius.get("authorities") or {}
 
-    points = [
-        "Most Solana memecoins trend to zero; prior is failure.",
-    ]
+    points = ["Most Solana memecoins trend to zero; prior is failure."]
     if liq < 30_000:
         points.append(f"Liquidity ${liq:,.0f} is below preferred safety threshold")
     if age_h is not None and age_h < 6:
@@ -255,6 +288,14 @@ def bear_researcher(reports: dict[str, str], market: dict[str, Any]) -> str:
         points.append(f"Already up {h24:.0f}% in 24h — asymmetric downside")
     if h24 < -25:
         points.append(f"Already down hard ({h24:+.0f}% 24h) — may be dead")
+
+    top10 = holders.get("top10_pct")
+    if top10 is not None and top10 >= 50:
+        points.append(f"Top-10 holders control {top10}% — concentrated supply risk")
+    if authorities.get("mint_authority_renounced") is False:
+        points.append("Mint authority still active — inflation / rug vector")
+    if authorities.get("freeze_authority_renounced") is False:
+        points.append("Freeze authority still active")
 
     points.append("Require extraordinary evidence before any BUY.")
     return "Bear Researcher:\n- " + "\n- ".join(points)
@@ -272,10 +313,36 @@ def trader_agent(reports: dict[str, str], market: dict[str, Any]) -> str:
     )
 
 
-def risk_manager(reports: dict[str, str], market: dict[str, Any]) -> str:
+def risk_manager(
+    reports: dict[str, str],
+    market: dict[str, Any],
+    helius: dict[str, Any] | None = None,
+) -> str:
     liq = float(market.get("liquidity_usd") or 0)
     age_h = _age_hours(market.get("pair_created_at"))
     vol24 = float((market.get("volume") or {}).get("h24") or 0)
+    helius = helius or {}
+    holders = helius.get("holders") or {}
+    authorities = helius.get("authorities") or {}
+
+    top1 = holders.get("top1_pct")
+    top10 = holders.get("top10_pct")
+
+    if top10 is not None and top10 >= 75:
+        return (
+            "Risk Manager: HARD AVOID — top-10 holders control ≥75% of supply. "
+            "Extreme coordinated dump risk."
+        )
+    if top1 is not None and top1 >= 40:
+        return (
+            "Risk Manager: HARD AVOID — single wallet holds ≥40%. "
+            "Unacceptable concentration."
+        )
+    if authorities.get("mint_authority_renounced") is False and liq < 150_000:
+        return (
+            "Risk Manager: AVOID / REJECT — mint authority still active on a modest-liquidity token. "
+            "Supply can be inflated."
+        )
 
     if liq < 8_000:
         return (
@@ -294,6 +361,11 @@ def risk_manager(reports: dict[str, str], market: dict[str, Any]) -> str:
         )
     if vol24 < 20_000:
         return "Risk Manager: Volume too thin — skip."
+    if top10 is not None and top10 >= 55:
+        return (
+            "Risk Manager: Elevated concentration (top-10 ≥55%). "
+            "Only micro size if any; prefer WATCH."
+        )
     if liq < 80_000:
         return (
             "Risk Manager: Conditional micro size only (≤0.5% portfolio, ≤1% of pool). "
