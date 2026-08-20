@@ -20,7 +20,17 @@ type Decision = {
   risk_reward?: number;
   explanation: string;
   token: { address?: string; name?: string; symbol?: string };
-  market: any;
+  market: {
+    price_usd?: number;
+    liquidity_usd?: number;
+    volume_h24?: number;
+    price_change_h1?: number;
+    price_change_h24?: number;
+    buy_ratio_h1?: number;
+    age_hours?: number;
+    dex_id?: string;
+    url?: string;
+  };
   timestamp: string;
 };
 
@@ -37,8 +47,14 @@ export default function Home() {
     setError(null);
     setDecision(null);
     try {
-      const r = await fetch(`${API}/tokens/search?q=${encodeURIComponent(query)}&limit=10`);
-      if (!r.ok) throw new Error("Search failed");
+      // If looks like a mint, analyze directly
+      if (query.trim().length >= 32 && !query.includes(" ")) {
+        await analyze(query.trim());
+        setSearchResults([]);
+        return;
+      }
+      const r = await fetch(`${API}/tokens/search?q=${encodeURIComponent(query)}&limit=12`);
+      if (!r.ok) throw new Error("Search failed — is the backend running?");
       const data = await r.json();
       setSearchResults(data);
     } catch (e: any) {
@@ -71,7 +87,7 @@ export default function Home() {
     decision?.action === "BUY" ? "buy" : decision?.action === "WATCH" ? "watch" : "avoid";
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "1.5rem" }}>
+    <main style={{ maxWidth: 1140, margin: "0 auto", padding: "1.5rem" }}>
       <header
         style={{
           display: "flex",
@@ -85,7 +101,7 @@ export default function Home() {
         <div>
           <h1 style={{ margin: 0, fontSize: "1.5rem" }}>Solana AI Trading Terminal</h1>
           <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-            Multi-agent analysis · Paper mode · Educational only
+            Multi-agent · v0.2 · Paper mode · Educational only
           </p>
         </div>
         <WalletMultiButton />
@@ -94,18 +110,18 @@ export default function Home() {
       <div className="card" style={{ marginBottom: "1rem" }}>
         <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
           <input
-            placeholder="Search token name, symbol, or paste mint address..."
+            placeholder="Search name/symbol or paste mint address..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && doSearch()}
-            style={{ flex: 1, minWidth: 220 }}
+            style={{ flex: 1, minWidth: 240 }}
           />
           <button onClick={doSearch} disabled={loading}>
-            {loading ? "Loading..." : "Search"}
+            {loading ? "Working..." : "Search / Analyze"}
           </button>
         </div>
         <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.75rem" }}>
-          Backend must be running at {API}. Real trading is disabled.
+          API: {API} · Real trading disabled · DYOR
         </p>
       </div>
 
@@ -119,7 +135,9 @@ export default function Home() {
         <section className="card">
           <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>Search Results</h2>
           {searchResults.length === 0 && (
-            <p style={{ color: "var(--muted)" }}>Search for a Solana token to begin.</p>
+            <p style={{ color: "var(--muted)" }}>
+              Search a Solana token, or paste a mint and hit Analyze.
+            </p>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
             {searchResults.map((p) => (
@@ -137,7 +155,8 @@ export default function Home() {
                 </strong>{" "}
                 <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
                   · Liq ${Number(p.liquidity_usd || 0).toLocaleString()} · Vol $
-                  {Number(p.volume?.h24 || 0).toLocaleString()}
+                  {Number(p.volume?.h24 || 0).toLocaleString()} ·{" "}
+                  {Number(p.price_change?.h24 || 0).toFixed(1)}% 24h
                 </span>
               </button>
             ))}
@@ -148,13 +167,21 @@ export default function Home() {
           <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>AI Analysis</h2>
           {!decision && (
             <p style={{ color: "var(--muted)" }}>
-              Select a token to run the multi-agent pipeline (Technical, Risk, Sentiment,
-              Narrative, Bull/Bear, Trader, Risk Manager).
+              Select a token to run Technical · Risk · Sentiment · Narrative · Bull/Bear ·
+              Trader · Risk Manager.
             </p>
           )}
           {decision && (
             <div>
-              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginBottom: "1rem" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "0.75rem",
+                  alignItems: "center",
+                  marginBottom: "1rem",
+                  flexWrap: "wrap",
+                }}
+              >
                 <span className={`badge ${actionClass}`}>{decision.action}</span>
                 <span>
                   Confidence <strong>{decision.confidence}%</strong>
@@ -162,9 +189,17 @@ export default function Home() {
                 <span style={{ color: "var(--muted)" }}>
                   {decision.token.symbol} · {decision.token.name}
                 </span>
+                {decision.market?.url && (
+                  <a href={decision.market.url} target="_blank" rel="noreferrer">
+                    DexScreener ↗
+                  </a>
+                )}
               </div>
 
-              <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "1rem" }}>
+              <div
+                className="grid"
+                style={{ gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "1rem" }}
+              >
                 <div>
                   <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Liquidity Score</div>
                   <strong>{decision.liquidity_score}/100</strong>
@@ -174,18 +209,45 @@ export default function Home() {
                   <strong>{decision.volume_momentum}</strong>
                 </div>
                 <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Holder Risk Score</div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Holder Risk</div>
                   <strong>{decision.holder_risk.score}/100</strong>
+                </div>
+                <div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Social Sentiment</div>
+                  <strong>{decision.social_sentiment}</strong>
                 </div>
                 <div>
                   <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Risk / Reward</div>
                   <strong>{decision.risk_reward ?? "—"}</strong>
                 </div>
+                <div>
+                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Pair Age</div>
+                  <strong>
+                    {decision.market?.age_hours != null
+                      ? `${decision.market.age_hours}h`
+                      : "—"}
+                  </strong>
+                </div>
               </div>
 
+              {decision.holder_risk.flags?.length > 0 && (
+                <p style={{ fontSize: "0.85rem" }}>
+                  <strong>Flags:</strong> {decision.holder_risk.flags.join(", ")}
+                </p>
+              )}
+
               <p style={{ fontSize: "0.9rem" }}>
+                <strong>Price:</strong> ${decision.market?.price_usd} ·{" "}
+                <strong>Liq:</strong> ${Number(decision.market?.liquidity_usd || 0).toLocaleString()} ·{" "}
+                <strong>24h:</strong> {Number(decision.market?.price_change_h24 || 0).toFixed(1)}% ·{" "}
+                <strong>Buy ratio 1h:</strong>{" "}
+                {decision.market?.buy_ratio_h1 != null
+                  ? `${(decision.market.buy_ratio_h1 * 100).toFixed(0)}%`
+                  : "—"}
+                <br />
                 <strong>Entry zone:</strong>{" "}
-                {decision.entry_zone.low?.toPrecision(6)} – {decision.entry_zone.high?.toPrecision(6)}
+                {decision.entry_zone.low?.toPrecision(6)} –{" "}
+                {decision.entry_zone.high?.toPrecision(6)}
                 <br />
                 <strong>Stop-loss:</strong> {decision.stop_loss?.toPrecision(6) ?? "—"}
                 <br />
@@ -212,7 +274,7 @@ export default function Home() {
                   background: "#0f172a",
                   padding: "0.75rem",
                   borderRadius: 8,
-                  maxHeight: 320,
+                  maxHeight: 340,
                   overflow: "auto",
                 }}
               >
@@ -220,7 +282,8 @@ export default function Home() {
               </pre>
 
               <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "1rem" }}>
-                Paper trading only. Real execution is disabled in this release. Always DYOR.
+                Paper trading only. Not financial advice. Always verify mint authority, LP lock,
+                and holders on Solscan / RugCheck.
               </p>
             </div>
           )}
