@@ -106,38 +106,7 @@ def _parse_risks(risks: list) -> tuple[list[dict[str, Any]], list[str], bool]:
             flags.append("sniper_or_insider_signal")
         if level.lower() in ("danger", "critical", "high"):
             flags.append(f"danger_{slug}" if slug else "danger_risk")
-    return list(dict.fromkeys(flags)), out, sniperish  # type: ignore[return-value]
-
-
-def _parse_risks_fixed(risks: list) -> tuple[list[dict[str, Any]], list[str], bool]:
-    out: list[dict[str, Any]] = []
-    flags: list[str] = []
-    sniperish = False
-    for r in risks or []:
-        if not isinstance(r, dict):
-            continue
-        name = str(r.get("name") or "")
-        level = str(r.get("level") or r.get("severity") or "warn")
-        desc = str(r.get("description") or "")
-        out.append(
-            {
-                "name": name,
-                "level": level,
-                "description": desc,
-                "value": r.get("value"),
-                "score": r.get("score"),
-            }
-        )
-        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-        if slug:
-            flags.append(f"rugcheck_{slug}")
-        if _SNIPER_RE.search(f"{name} {desc}"):
-            sniperish = True
-            flags.append("sniper_or_insider_signal")
-        if level.lower() in ("danger", "critical", "high"):
-            flags.append(f"danger_{slug}" if slug else "danger_risk")
-    flags = list(dict.fromkeys(flags))
-    return out, flags, sniperish
+    return out, list(dict.fromkeys(flags)), sniperish
 
 
 def _top_holders_from_report(report: dict) -> list[dict[str, Any]]:
@@ -165,6 +134,12 @@ def _top_holders_from_report(report: dict) -> list[dict[str, Any]]:
 async def enrich_rugcheck(mint: str) -> dict[str, Any]:
     report, summary = await asyncio.gather(get_report(mint), get_summary(mint))
 
+    links = {
+        "rugcheck": f"https://rugcheck.xyz/tokens/{mint}",
+        "solscan": f"https://solscan.io/token/{mint}",
+        "solscan_holders": f"https://solscan.io/token/{mint}#holders",
+    }
+
     if not report and not summary:
         return {
             "configured": True,
@@ -177,15 +152,11 @@ async def enrich_rugcheck(mint: str) -> dict[str, Any]:
             "flags": ["rugcheck_unavailable"],
             "sniper_or_insider_suspected": False,
             "top_holders": [],
-            "links": {
-                "rugcheck": f"https://rugcheck.xyz/tokens/{mint}",
-                "solscan": f"https://solscan.io/token/{mint}",
-                "solscan_holders": f"https://solscan.io/token/{mint}#holders",
-            },
+            "links": links,
         }
 
     risks_raw = (report or {}).get("risks") or (summary or {}).get("risks") or []
-    risks, flags, sniperish = _parse_risks_fixed(risks_raw)
+    risks, flags, sniperish = _parse_risks(risks_raw)
     lp_pct = _extract_lp_locked_pct(report or {}, summary)
 
     score = None
@@ -225,9 +196,5 @@ async def enrich_rugcheck(mint: str) -> dict[str, Any]:
         "freeze_authority": freeze_auth,
         "mint_authority_renounced": mint_auth in (None, "", "null"),
         "freeze_authority_renounced": freeze_auth in (None, "", "null"),
-        "links": {
-            "rugcheck": f"https://rugcheck.xyz/tokens/{mint}",
-            "solscan": f"https://solscan.io/token/{mint}",
-            "solscan_holders": f"https://solscan.io/token/{mint}#holders",
-        },
+        "links": links,
     }
