@@ -12,6 +12,13 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -23,6 +30,7 @@ from data.dexscreener import (
     boosted_tokens,
     latest_token_profiles,
 )
+from data.helius import enrich_token, helius_configured, get_holder_concentration, get_token_authorities
 from analysis.pipeline import run_analysis
 from analysis.schemas import Decision
 
@@ -30,9 +38,10 @@ app = FastAPI(
     title="Solana AI Trading Terminal",
     description=(
         "Multi-agent Solana token analysis inspired by TradingAgents. "
+        "Helius-powered holder concentration & authorities. "
         "Paper trading only by default. Educational / research use."
     ),
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -43,22 +52,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Paper trading state (in-memory — resets on restart)
-# ---------------------------------------------------------------------------
 _paper_balance = 10_000.0
 _paper_trades: list[dict] = []
-_paper_positions: dict[str, dict] = {}  # token_address -> position
+_paper_positions: dict[str, dict] = {}
 
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "mode": "paper",
         "real_trading": False,
+        "helius_configured": helius_configured(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/helius/status")
+async def helius_status():
+    return {
+        "configured": helius_configured(),
+        "features": [
+            "getTokenLargestAccounts (top holder concentration)",
+            "getTokenSupply",
+            "getAsset DAS (mint/freeze authority)",
+        ],
+        "hint": None
+        if helius_configured()
+        else "Set HELIUS_API_KEY in backend/.env — free key at https://dashboard.helius.dev",
     }
 
 
@@ -90,7 +112,9 @@ async def _best_market(token_address: str) -> dict:
 @app.get("/analyze/{token_address}", response_model=Decision)
 async def analyze_token(token_address: str):
     market = await _best_market(token_address)
-    return run_analysis(market)
+    mint = (market.get("base_token") or {}).get("address") or token_address
+    helius = await enrich_token(mint)
+    return run_analysis(market, helius)
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -99,12 +123,14 @@ class BatchAnalyzeRequest(BaseModel):
 
 @app.post("/analyze/batch")
 async def analyze_batch(req: BatchAnalyzeRequest):
-    """Analyze up to 10 tokens. Returns list of decisions (skips failures)."""
+    """Analyze up to 10 tokens with Helius enrichment."""
     results = []
     for addr in req.addresses[:10]:
         try:
             market = await _best_market(addr.strip())
-            results.append(run_analysis(market).model_dump())
+            mint = (market.get("base_token") or {}).get("address") or addr.strip()
+            helius = await enrich_token(mint)
+            results.append(run_analysis(market, helius).model_dump())
         except Exception as e:
             results.append({"token": {"address": addr}, "error": str(e)})
     return {"count": len(results), "results": results}
@@ -112,8 +138,29 @@ async def analyze_batch(req: BatchAnalyzeRequest):
 
 @app.get("/market/{token_address}")
 async def market_snapshot(token_address: str):
-    """Raw normalized market data without full agent pipeline."""
     return await _best_market(token_address)
+
+
+@app.get("/helius/holders/{token_address}")
+async def helius_holders(token_address: str):
+    """Raw Helius top-holder concentration for a mint."""
+    if not helius_configured():
+        raise HTTPException(
+            503,
+            "HELIUS_API_KEY not configured. Add it to backend/.env",
+        )
+    return await get_holder_concentration(token_address)
+
+
+@app.get("/helius/authorities/{token_address}")
+async def helius_authorities(token_address: str):
+    """Mint / freeze authority status via Helius DAS getAsset."""
+    if not helius_configured():
+        raise HTTPException(
+            503,
+            "HELIUS_API_KEY not configured. Add it to backend/.env",
+        )
+    return await get_token_authorities(token_address)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +170,7 @@ async def market_snapshot(token_address: str):
 class PaperTradeRequest(BaseModel):
     token_address: str
     symbol: str
-    side: str  # buy | sell
+    side: str
     usd_amount: float
     price: float
     note: Optional[str] = None
@@ -132,7 +179,6 @@ class PaperTradeRequest(BaseModel):
 @app.get("/paper/summary")
 async def paper_summary():
     positions = list(_paper_positions.values())
-    unrealized = 0.0  # mark-to-market would need live prices; omitted in MVP
     return {
         "cash_usd": round(_paper_balance, 4),
         "open_positions": len(positions),
@@ -168,6 +214,7 @@ async def paper_trade(req: PaperTradeRequest):
 
     qty = req.usd_amount / req.price
     addr = req.token_address
+    proceeds = req.usd_amount
 
     if req.side == "buy":
         if req.usd_amount > _paper_balance:
@@ -198,7 +245,6 @@ async def paper_trade(req: PaperTradeRequest):
         proceeds = sell_qty * req.price
         _paper_balance += proceeds
         pos["qty"] -= sell_qty
-        # reduce cost basis proportionally
         if pos["qty"] <= 1e-12:
             del _paper_positions[addr]
         else:
@@ -220,7 +266,12 @@ async def paper_trade(req: PaperTradeRequest):
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     _paper_trades.append(trade)
-    return {"ok": True, "trade": trade, "balance_usd": _paper_balance, "positions": list(_paper_positions.values())}
+    return {
+        "ok": True,
+        "trade": trade,
+        "balance_usd": _paper_balance,
+        "positions": list(_paper_positions.values()),
+    }
 
 
 @app.post("/paper/reset")
