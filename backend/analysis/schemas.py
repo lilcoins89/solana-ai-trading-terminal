@@ -18,6 +18,20 @@ class HolderRisk(BaseModel):
     details: dict[str, Any] = {}
 
 
+class CrossCheck(BaseModel):
+    """RugCheck + Solscan LP lock / sniper cross-check."""
+
+    lp_locked_pct: Optional[float] = None
+    rugcheck_score: Optional[float] = None
+    rugcheck_score_normalised: Optional[float] = None
+    sniper_or_insider_suspected: bool = False
+    risks: list[dict[str, Any]] = []
+    flags: list[str] = []
+    links: dict[str, str] = {}
+    rugcheck_ok: bool = False
+    notes: str = ""
+
+
 class PositionSizing(BaseModel):
     pct_of_portfolio: float
     max_usd: float
@@ -30,6 +44,7 @@ class Decision(BaseModel):
     liquidity_score: int = Field(ge=0, le=100)
     volume_momentum: Literal["strong", "moderate", "weak", "dying"]
     holder_risk: HolderRisk
+    cross_check: CrossCheck = Field(default_factory=CrossCheck)
     social_sentiment: Literal["bullish", "neutral", "bearish", "unknown"]
     technical_signals: list[str]
     entry_zone: dict[str, Optional[float]]
