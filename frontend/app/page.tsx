@@ -11,7 +11,14 @@ const money=(n:number)=>`$${n.toLocaleString(undefined,{maximumFractionDigits:0}
 export default function Home(){
  const [markets,setMarkets]=useState<Market[]>([]),[selected,setSelected]=useState(""),[watch,setWatch]=useState<string[]>([]),[positions,setPositions]=useState<Position[]>([]),[cash,setCash]=useState<number|null>(null),[amount,setAmount]=useState(""),[side,setSide]=useState<"buy"|"sell">("buy"),[query,setQuery]=useState(""),[toast,setToast]=useState("");
  const active=markets.find(m=>m.symbol===selected)||markets[0];
- useEffect(()=>{fetch(`${API}/tokens/solana?limit=12`).then(r=>r.ok?r.json():null).then(d=>{if(Array.isArray(d)){setMarkets(d);setSelected(d[0]?.symbol||"")}}).catch(()=>{});fetch(`${API}/analytics/terminal`).then(r=>r.ok?r.json():null).then(d=>{if(d?.watchlist)setWatch(d.watchlist.map((x:any)=>x.symbol))}).catch(()=>{});fetch(`${API}/paper/summary`).then(r=>r.ok?r.json():null).then(d=>{if(d){setCash(d.cash_usd);setPositions(d.positions||[])}}).catch(()=>{})},[]);
+ useEffect(()=>{
+  const refreshTokens=()=>fetch(`${API}/tokens/solana?limit=12`,{cache:"no-store"}).then(r=>r.ok?r.json():null).then(d=>{if(Array.isArray(d)){setMarkets(d);setSelected(current=>d.some((m:Market)=>m.symbol===current)?current:(d[0]?.symbol||""))}}).catch(()=>{});
+  const refreshAccount=()=>{fetch(`${API}/analytics/terminal`,{cache:"no-store"}).then(r=>r.ok?r.json():null).then(d=>{if(d?.watchlist)setWatch(d.watchlist.map((x:any)=>x.symbol))}).catch(()=>{});fetch(`${API}/paper/summary`,{cache:"no-store"}).then(r=>r.ok?r.json():null).then(d=>{if(d){setCash(d.cash_usd);setPositions(d.positions||[])}}).catch(()=>{})};
+  refreshTokens();
+  refreshAccount();
+  const interval=window.setInterval(refreshTokens,20*60*1000);
+  return ()=>window.clearInterval(interval);
+ },[]);
  const filtered=useMemo(()=>markets.filter(m=>(m.symbol+m.name).toLowerCase().includes(query.toLowerCase())),[markets,query]);
  const notify=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2400)};
  async function trade(){if(!active)return;const usd=Number(amount);if(!usd||usd<=0)return;try{const r=await fetch(`${API}/paper/trade`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token_address:active.token_address,symbol:active.symbol,side,usd_amount:usd,price:active.price})});const d=await r.json();if(!r.ok){notify(d.detail||"Trade rejected");return}setCash(d.balance_usd);setPositions(d.positions||[]);notify(`${side.toUpperCase()} order filled in paper mode`)}catch{notify("Backend unavailable")}}
