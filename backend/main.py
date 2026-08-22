@@ -38,8 +38,9 @@ from data.rugcheck import enrich_rugcheck, get_report, get_summary
 from data.solscan import enrich_solscan
 from analysis.pipeline import run_analysis
 from analysis.schemas import Decision
+from analytics import repo
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 app = FastAPI(
     title="Solana AI Trading Terminal",
@@ -83,7 +84,34 @@ async def health():
         "helius_configured": helius_configured(),
         "rugcheck": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "analytics": repo.backend,
     }
+
+
+@app.get("/analytics/terminal")
+async def terminal_snapshot():
+    return {"markets": repo.markets(), "watchlist": repo.watchlist(), "analyses": repo.analyses(), "trades": repo.trades(), "analytics_backend": repo.backend}
+
+@app.get("/analytics/markets/{symbol}/history")
+async def market_history(symbol: str):
+    return repo.history(symbol)
+
+@app.get("/analytics/watchlist")
+async def analytics_watchlist():
+    return repo.watchlist()
+
+@app.post("/analytics/watchlist")
+async def add_watchlist(item: dict):
+    return repo.add_watch(item)
+
+@app.delete("/analytics/watchlist/{address}")
+async def delete_watchlist(address: str):
+    repo.remove_watch(address)
+    return {"ok": True}
+
+@app.get("/analytics/analyses")
+async def analysis_history():
+    return repo.analyses()
 
 
 @app.get("/helius/status")
@@ -131,7 +159,9 @@ async def analyze_token(token_address: str):
     market = await _best_market(token_address)
     mint = (market.get("base_token") or {}).get("address") or token_address
     helius, cross = await _enrich_all(mint, market.get("pair_address"))
-    return run_analysis(market, helius, cross)
+    result = run_analysis(market, helius, cross)
+    repo.save_analysis(result.model_dump())
+    return result
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -291,6 +321,7 @@ async def paper_trade(req: PaperTradeRequest):
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     _paper_trades.append(trade)
+    repo.save_trade(trade)
     return {
         "ok": True,
         "trade": trade,

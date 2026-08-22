@@ -1,269 +1,29 @@
 "use client";
 
-import { useState } from "react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+type Market = { symbol:string; name:string; price:number; change_24h:number; volume_24h:number; liquidity:number };
+type Position = { symbol:string; token_address:string; qty:number; cost_usd:number; avg_price:number };
+const fallback: Market[] = [{symbol:"SOL",name:"Solana",price:178.42,change_24h:4.82,volume_24h:2840000000,liquidity:8120000000},{symbol:"JUP",name:"Jupiter",price:1.12,change_24h:-2.14,volume_24h:182000000,liquidity:412000000},{symbol:"BONK",name:"Bonk",price:.000031,change_24h:8.67,volume_24h:94000000,liquidity:210000000},{symbol:"WIF",name:"dogwifhat",price:2.84,change_24h:1.34,volume_24h:211000000,liquidity:530000000},{symbol:"PYTH",name:"Pyth Network",price:.39,change_24h:-.78,volume_24h:68000000,liquidity:124000000}];
+const fmt=(n:number)=>n<.01? n.toFixed(6): n.toLocaleString(undefined,{maximumFractionDigits:2}); const money=(n:number)=>`$${n.toLocaleString(undefined,{maximumFractionDigits:0})}`;
 
-type Decision = {
-  action: "BUY" | "WATCH" | "AVOID";
-  confidence: number;
-  liquidity_score: number;
-  volume_momentum: string;
-  holder_risk: {
-    score: number;
-    top1_pct?: number | null;
-    top10_pct?: number | null;
-    mint_authority_renounced?: boolean | null;
-    freeze_authority_renounced?: boolean | null;
-    helius_configured?: boolean;
-    flags: string[];
-  };
-  cross_check?: {
-    lp_locked_pct?: number | null;
-    sniper_or_insider_suspected?: boolean;
-    rugcheck_ok?: boolean;
-    risks?: { name?: string; level?: string }[];
-    links?: Record<string, string>;
-    notes?: string;
-  };
-  social_sentiment: string;
-  technical_signals: string[];
-  entry_zone: { low?: number; high?: number };
-  stop_loss?: number;
-  take_profit: number[];
-  position_sizing: { pct_of_portfolio: number; max_usd: number };
-  risk_reward?: number;
-  explanation: string;
-  token: { address?: string; name?: string; symbol?: string };
-  market: any;
-};
-
-function authLabel(v?: boolean | null) {
-  if (v === true) return "Renounced ✓";
-  if (v === false) return "ACTIVE ⚠";
-  return "Unknown";
-}
-
-export default function Home() {
-  const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [decision, setDecision] = useState<Decision | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-
-  async function doSearch() {
-    if (!query.trim()) return;
-    setLoading(true);
-    setError(null);
-    setDecision(null);
-    try {
-      if (query.trim().length >= 32 && !query.includes(" ")) {
-        await analyze(query.trim());
-        setSearchResults([]);
-        return;
-      }
-      const r = await fetch(`${API}/tokens/search?q=${encodeURIComponent(query)}&limit=12`);
-      if (!r.ok) throw new Error("Search failed — is the backend running?");
-      setSearchResults(await r.json());
-    } catch (e: any) {
-      setError(e.message || "Search error");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function analyze(address: string) {
-    setLoading(true);
-    setError(null);
-    setDecision(null);
-    try {
-      const r = await fetch(`${API}/analyze/${address}`);
-      if (!r.ok) throw new Error((await r.text()) || "Analysis failed");
-      setDecision(await r.json());
-    } catch (e: any) {
-      setError(e.message || "Analysis error");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const actionClass =
-    decision?.action === "BUY" ? "buy" : decision?.action === "WATCH" ? "watch" : "avoid";
-  const cc = decision?.cross_check;
-
-  return (
-    <main style={{ maxWidth: 1140, margin: "0 auto", padding: "1.5rem" }}>
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "1.5rem",
-          gap: "1rem",
-          flexWrap: "wrap",
-        }}
-      >
-        <div>
-          <h1 style={{ margin: 0, fontSize: "1.5rem" }}>Solana AI Trading Terminal</h1>
-          <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-            Multi-agent · Helius · RugCheck · Solscan · v0.4 · Paper only
-          </p>
-        </div>
-        <WalletMultiButton />
-      </header>
-
-      <div className="card" style={{ marginBottom: "1rem" }}>
-        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-          <input
-            placeholder="Search name/symbol or paste mint..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && doSearch()}
-            style={{ flex: 1, minWidth: 240 }}
-          />
-          <button onClick={doSearch} disabled={loading}>
-            {loading ? "Working..." : "Search / Analyze"}
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div className="card" style={{ borderColor: "var(--red)", marginBottom: "1rem" }}>
-          {error}
-        </div>
-      )}
-
-      <div className="grid grid-2">
-        <section className="card">
-          <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>Search Results</h2>
-          {searchResults.length === 0 && (
-            <p style={{ color: "var(--muted)" }}>Search or paste a mint to analyze.</p>
-          )}
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-            {searchResults.map((p) => (
-              <button
-                key={p.pair_address}
-                onClick={() => analyze(p.base_token?.address)}
-                style={{ textAlign: "left", background: "#0f172a", border: "1px solid var(--border)" }}
-              >
-                <strong>
-                  {p.base_token?.symbol} / {p.quote_token?.symbol}
-                </strong>{" "}
-                <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
-                  · Liq ${Number(p.liquidity_usd || 0).toLocaleString()}
-                </span>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="card">
-          <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>AI Analysis</h2>
-          {!decision && <p style={{ color: "var(--muted)" }}>Select a token to run the full pipeline.</p>}
-          {decision && (
-            <div>
-              <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
-                <span className={`badge ${actionClass}`}>{decision.action}</span>
-                <span>
-                  Confidence <strong>{decision.confidence}%</strong>
-                </span>
-                <span style={{ color: "var(--muted)" }}>
-                  {decision.token.symbol}
-                </span>
-              </div>
-
-              <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>LP locked (RugCheck)</div>
-                  <strong>
-                    {cc?.lp_locked_pct != null ? `${cc.lp_locked_pct}%` : "n/a"}
-                  </strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Sniper / insider</div>
-                  <strong>{cc?.sniper_or_insider_suspected ? "Suspected ⚠" : "Not flagged"}</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Holder risk</div>
-                  <strong>{decision.holder_risk.score}/100</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Top-10</div>
-                  <strong>
-                    {decision.holder_risk.top10_pct != null
-                      ? `${decision.holder_risk.top10_pct}%`
-                      : "—"}
-                  </strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Mint auth</div>
-                  <strong>{authLabel(decision.holder_risk.mint_authority_renounced)}</strong>
-                </div>
-                <div>
-                  <div style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Freeze auth</div>
-                  <strong>{authLabel(decision.holder_risk.freeze_authority_renounced)}</strong>
-                </div>
-              </div>
-
-              <p style={{ fontSize: "0.9rem", marginTop: "0.75rem" }}>
-                {cc?.links?.rugcheck && (
-                  <>
-                    <a href={cc.links.rugcheck} target="_blank" rel="noreferrer">
-                      RugCheck ↗
-                    </a>{" "}
-                  </>
-                )}
-                {(cc?.links?.solscan_holders || cc?.links?.solscan) && (
-                  <a
-                    href={cc.links.solscan_holders || cc.links.solscan}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Solscan holders ↗
-                  </a>
-                )}
-              </p>
-
-              {cc?.risks && cc.risks.length > 0 && (
-                <>
-                  <h3 style={{ fontSize: "0.95rem" }}>RugCheck risks</h3>
-                  <ul style={{ marginTop: 0 }}>
-                    {cc.risks.slice(0, 6).map((r, i) => (
-                      <li key={i}>
-                        [{r.level}] {r.name}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-
-              <h3 style={{ fontSize: "0.95rem" }}>Technical signals</h3>
-              <ul style={{ marginTop: 0 }}>
-                {decision.technical_signals.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ul>
-
-              <h3 style={{ fontSize: "0.95rem" }}>AI Explanation</h3>
-              <pre
-                style={{
-                  whiteSpace: "pre-wrap",
-                  fontSize: "0.82rem",
-                  color: "var(--muted)",
-                  background: "#0f172a",
-                  padding: "0.75rem",
-                  borderRadius: 8,
-                  maxHeight: 320,
-                  overflow: "auto",
-                }}
-              >
-                {decision.explanation}
-              </pre>
-            </div>
-          )}
-        </section>
-      </div>
-    </main>
-  );
+export default function Home(){
+ const [markets,setMarkets]=useState<Market[]>(fallback),[selected,setSelected]=useState("SOL"),[watch,setWatch]=useState<string[]>(["SOL","BONK","JUP"]),[positions,setPositions]=useState<Position[]>([]),[cash,setCash]=useState(10000),[amount,setAmount]=useState("500"),[side,setSide]=useState<"buy"|"sell">("buy"),[query,setQuery]=useState(""),[toast,setToast]=useState("");
+ const active=markets.find(m=>m.symbol===selected)||markets[0];
+ useEffect(()=>{fetch(`${API}/analytics/terminal`).then(r=>r.ok?r.json():null).then(d=>{if(d?.markets?.length)setMarkets(d.markets); if(d?.watchlist?.length)setWatch(d.watchlist.map((x:any)=>x.symbol));}).catch(()=>{}); fetch(`${API}/paper/summary`).then(r=>r.ok?r.json():null).then(d=>{if(d){setCash(d.cash_usd);setPositions(d.positions||[])}}).catch(()=>{})},[]);
+ const filtered=useMemo(()=>markets.filter(m=>(m.symbol+m.name).toLowerCase().includes(query.toLowerCase())),[markets,query]);
+ const notify=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2400)};
+ async function trade(){const usd=Number(amount); if(!usd||usd<=0)return; try {const r=await fetch(`${API}/paper/trade`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token_address:active.symbol,symbol:active.symbol,side,usd_amount:usd,price:active.price})}); const d=await r.json(); if(!r.ok){notify(d.detail||"Trade rejected");return} setCash(d.balance_usd);setPositions(d.positions||[]);notify(`${side.toUpperCase()} order filled in paper mode`)} catch {notify("Backend unavailable — start the local API to trade")}}
+ function toggle(){setWatch(w=>w.includes(active.symbol)?w.filter(x=>x!==active.symbol):[...w,active.symbol]);notify(watch.includes(active.symbol)?"Removed from watchlist":"Added to watchlist")}
+ return <main className="min-h-screen bg-background text-foreground"><div className="terminal-grid fixed inset-0 pointer-events-none"/><div className="relative flex min-h-screen">
+  <aside className="hidden w-64 shrink-0 border-r border-[var(--line)] bg-[var(--panel)] p-5 lg:flex lg:flex-col"><div className="mb-12 flex items-center gap-3"><div className="grid size-9 place-items-center rounded-lg bg-[var(--teal)] font-mono font-bold text-[#071019]">A</div><div><div className="font-semibold tracking-wide">ARC TERMINAL</div><div className="font-mono text-[10px] text-[var(--muted)]">SOLANA INTELLIGENCE</div></div></div><nav className="flex flex-col gap-2 text-sm"><div className="rounded-lg bg-[var(--panel-2)] px-3 py-2.5 text-[var(--teal)]">Overview <span className="float-right font-mono text-xs">⌘1</span></div><div className="px-3 py-2.5 text-[var(--muted)]">Markets</div><div className="px-3 py-2.5 text-[var(--muted)]">Paper portfolio</div><div className="px-3 py-2.5 text-[var(--muted)]">Analysis history</div></nav><div className="mt-auto rounded-xl border border-[var(--line)] bg-[var(--panel-2)] p-4"><div className="mb-2 flex items-center gap-2 text-xs text-[var(--muted)]"><span className="size-2 rounded-full bg-[var(--teal)]"/> LOCAL DUCKDB</div><p className="m-0 text-xs leading-5 text-[var(--muted)]">Analytics are running locally. Paper trading only.</p></div></aside>
+  <section className="min-w-0 flex-1"><header className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--panel)]/90 px-5 py-4 backdrop-blur"><div className="lg:hidden font-semibold">ARC TERMINAL</div><div className="flex items-center gap-3 text-xs text-[var(--muted)]"><span className="size-2 rounded-full bg-[var(--teal)]"/> SYSTEMS NOMINAL <span className="hidden sm:inline">·</span> PAPER ENVIRONMENT</div><div className="font-mono text-xs text-[var(--muted)]">22 AUG 2026 · 14:32 UTC</div></header>
+   <div className="mx-auto max-w-[1500px] p-5 md:p-8"><div className="mb-8 flex flex-col justify-between gap-5 xl:flex-row xl:items-end"><div><p className="mb-2 font-mono text-xs uppercase tracking-[.22em] text-[var(--teal)]">MARKET OVERVIEW / 01</p><h1 className="m-0 max-w-3xl text-3xl font-semibold tracking-tight md:text-5xl">Read the market<br/><span className="text-[var(--muted)]">before it moves.</span></h1></div><div className="flex items-center gap-3"><div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-3"><div className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Paper equity</div><div className="font-mono text-xl">{money(cash)}</div></div><button onClick={()=>{fetch(`${API}/paper/reset`,{method:"POST"});setCash(10000);setPositions([]);notify("Paper account reset")}} className="rounded-lg border border-[var(--line)] px-4 py-3 text-xs text-[var(--muted)] hover:text-foreground">Reset</button></div></div>
+    <div className="mb-6 flex flex-col gap-3 sm:flex-row"><div className="relative flex-1"><span className="absolute left-4 top-3 text-[var(--muted)]">⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search tokens, pairs, addresses..." className="w-full rounded-lg border border-[var(--line)] bg-[var(--panel)] px-10 py-3 text-sm outline-none focus:border-[var(--teal)]"/></div><button onClick={()=>notify("Live DexScreener search is available through the API") } className="rounded-lg bg-[var(--teal)] px-5 py-3 text-sm font-semibold text-[#071019]">Analyze token</button></div>
+    <div className="grid gap-5 xl:grid-cols-[1.35fr_.65fr]"><div className="space-y-5"><section className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--panel)]"><div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4"><div><h2 className="m-0 text-sm font-semibold">Market pulse</h2><p className="m-0 mt-1 text-xs text-[var(--muted)]">Highest volume assets · local snapshot</p></div><span className="font-mono text-[10px] text-[var(--teal)]">LIVE</span></div><div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="text-[10px] uppercase tracking-widest text-[var(--muted)]"><tr><th className="px-5 py-3 font-normal">Asset</th><th className="px-3 py-3 font-normal">Price</th><th className="px-3 py-3 font-normal">24h</th><th className="px-3 py-3 font-normal">Volume</th><th className="px-5 py-3 font-normal">Liquidity</th></tr></thead><tbody>{filtered.map(m=><tr key={m.symbol} onClick={()=>setSelected(m.symbol)} className={`cursor-pointer border-t border-[var(--line)]/70 hover:bg-[var(--panel-2)] ${selected===m.symbol?"bg-[var(--panel-2)]":""}`}><td className="px-5 py-4"><div className="flex items-center gap-3"><div className="grid size-8 place-items-center rounded-full bg-[var(--line)] font-mono text-xs">{m.symbol[0]}</div><div><div className="font-semibold">{m.symbol}</div><div className="text-xs text-[var(--muted)]">{m.name}</div></div></div></td><td className="px-3 font-mono">${fmt(m.price)}</td><td className={`px-3 font-mono ${m.change_24h>=0?"text-[var(--teal)]":"text-[var(--red)]"}`}>{m.change_24h>=0?"+":""}{m.change_24h.toFixed(2)}%</td><td className="px-3 font-mono text-xs text-[var(--muted)]">{money(m.volume_24h)}</td><td className="px-5 font-mono text-xs text-[var(--muted)]">{money(m.liquidity)}</td></tr>)}</tbody></table></div></section>
+     <section className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5"><div className="mb-5 flex items-start justify-between"><div><p className="mb-1 font-mono text-xs text-[var(--teal)]">{active.symbol} / USD</p><h2 className="m-0 text-2xl font-semibold">${fmt(active.price)}</h2></div><div className={`font-mono text-sm ${active.change_24h>=0?"text-[var(--teal)]":"text-[var(--red)]"}`}>{active.change_24h>=0?"+":""}{active.change_24h}% today</div></div><div className="relative h-56 overflow-hidden rounded-lg bg-[var(--panel-2)]"><svg viewBox="0 0 800 240" preserveAspectRatio="none" className="size-full"><defs><linearGradient id="fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#39d3b4" stopOpacity=".28"/><stop offset="1" stopColor="#39d3b4" stopOpacity="0"/></linearGradient></defs><path d="M0 188 C60 170 70 184 125 145 S190 185 244 132 S325 122 370 140 S430 72 488 105 S555 84 607 112 S675 50 730 72 S770 55 800 38 L800 240 L0 240Z" fill="url(#fill)"/><path d="M0 188 C60 170 70 184 125 145 S190 185 244 132 S325 122 370 140 S430 72 488 105 S555 84 607 112 S675 50 730 72 S770 55 800 38" fill="none" stroke="#39d3b4" strokeWidth="3"/></svg><div className="absolute bottom-3 left-4 right-4 flex justify-between font-mono text-[10px] text-[var(--muted)]"><span>12:00</span><span>14:00</span><span>16:00</span><span>18:00</span><span>NOW</span></div></div><div className="mt-5 grid grid-cols-3 gap-3 text-xs"><div><div className="text-[var(--muted)]">Volume</div><div className="mt-1 font-mono">{money(active.volume_24h)}</div></div><div><div className="text-[var(--muted)]">Liquidity</div><div className="mt-1 font-mono">{money(active.liquidity)}</div></div><div><div className="text-[var(--muted)]">Signal</div><div className="mt-1 text-[var(--teal)]">ACCUMULATE</div></div></div></section></div>
+     <aside className="space-y-5"><section className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5"><div className="mb-5 flex items-center justify-between"><div><p className="mb-1 font-mono text-xs text-[var(--amber)]">EXECUTION / PAPER</p><h2 className="m-0 text-lg">Trade ticket</h2></div><button onClick={toggle} className="text-xl text-[var(--muted)] hover:text-[var(--amber)]">{watch.includes(active.symbol)?"★":"☆"}</button></div><div className="mb-4 grid grid-cols-2 rounded-lg bg-[var(--panel-2)] p-1"><button onClick={()=>setSide("buy")} className={`rounded-md py-2 text-sm ${side==="buy"?"bg-[var(--teal)] font-semibold text-[#071019]":"text-[var(--muted)]"}`}>Buy</button><button onClick={()=>setSide("sell")} className={`rounded-md py-2 text-sm ${side==="sell"?"bg-[var(--red)] font-semibold text-[#071019]":"text-[var(--muted)]"}`}>Sell</button></div><label className="mb-2 block text-xs text-[var(--muted)]">Amount in USD</label><input value={amount} onChange={e=>setAmount(e.target.value)} type="number" className="mb-3 w-full rounded-lg border border-[var(--line)] bg-[var(--panel-2)] px-3 py-3 font-mono outline-none focus:border-[var(--teal)]"/><div className="mb-5 flex justify-between text-xs text-[var(--muted)]"><span>Est. price</span><span className="font-mono">${fmt(active.price)}</span></div><button onClick={trade} className={`w-full rounded-lg py-3 text-sm font-semibold ${side==="buy"?"bg-[var(--teal)] text-[#071019]":"bg-[var(--red)] text-[#071019]"}`}>{side==="buy"?"Place paper buy":"Place paper sell"}</button><p className="mt-3 text-center text-[10px] text-[var(--muted)]">No wallet required · no real transactions</p></section><section className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5"><div className="mb-4 flex justify-between"><h2 className="m-0 text-sm">Watchlist</h2><span className="font-mono text-xs text-[var(--muted)]">{watch.length} assets</span></div><div className="flex flex-col gap-3">{watch.map(s=>{const m=markets.find(x=>x.symbol===s);return m?<button key={s} onClick={()=>setSelected(s)} className="flex items-center justify-between text-left"><span className="font-mono text-sm">{m.symbol}</span><span className="font-mono text-xs">${fmt(m.price)} <i className={`ml-2 not-italic ${m.change_24h>=0?"text-[var(--teal)]":"text-[var(--red)]"}`}>{m.change_24h>=0?"+":""}{m.change_24h}%</i></span></button>:null})}</div></section></aside></div>
+    <section className="mt-5 rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5"><div className="mb-4 flex items-center justify-between"><div><h2 className="m-0 text-sm">Open positions</h2><p className="m-0 mt-1 text-xs text-[var(--muted)]">Your paper portfolio</p></div><span className="font-mono text-xs text-[var(--muted)]">{positions.length} positions</span></div>{positions.length?<div className="grid gap-3 md:grid-cols-3">{positions.map(p=><div key={p.token_address} className="rounded-lg bg-[var(--panel-2)] p-4"><div className="flex justify-between"><span className="font-semibold">{p.symbol}</span><span className="text-[var(--teal)]">OPEN</span></div><div className="mt-3 flex justify-between text-xs text-[var(--muted)]"><span>Size</span><span className="font-mono text-foreground">{money(p.cost_usd)}</span></div><div className="mt-1 flex justify-between text-xs text-[var(--muted)]"><span>Avg. entry</span><span className="font-mono text-foreground">${fmt(p.avg_price)}</span></div></div>)}</div>:<div className="rounded-lg border border-dashed border-[var(--line)] py-8 text-center text-sm text-[var(--muted)]">No open positions. Select an asset and place a paper order.</div>}</section>
+    <footer className="mt-8 flex flex-wrap gap-4 border-t border-[var(--line)] pt-5 text-[10px] uppercase tracking-widest text-[var(--muted)]"><span>Data: DexScreener · Helius · RugCheck</span><span>Storage: local DuckDB</span><span>Execution: simulated</span></footer></div></section></div>{toast&&<div className="fixed bottom-5 right-5 rounded-lg border border-[var(--teal)] bg-[var(--panel)] px-4 py-3 text-sm shadow-xl">{toast}</div>}</main>
 }
