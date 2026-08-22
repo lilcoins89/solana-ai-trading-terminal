@@ -30,6 +30,7 @@ from data.dexscreener import (
     boosted_tokens,
     latest_token_profiles,
 )
+from data.solana_tokens import solana_token_feed
 from data.helius import (
     enrich_token,
     helius_configured,
@@ -152,7 +153,11 @@ async def tokens_boosted(limit: int = 20):
 
 @app.get("/tokens/profiles")
 async def tokens_profiles(limit: int = 25):
-    return await latest_token_profiles(limit=limit)
+    return [p for p in await latest_token_profiles(limit=limit * 2) if p.get("chainId") == "solana"][:limit]
+
+@app.get("/tokens/solana")
+async def tokens_solana(limit: int = Query(12, ge=1, le=30)):
+    return await solana_token_feed(limit)
 
 
 async def _best_market(token_address: str) -> dict:
