@@ -16,20 +16,11 @@ class NeonRepository:
     async def connect(self) -> None:
         if self.pool is None and os.getenv("DATABASE_URL"):
             self.pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=5)
-            await self.seed_markets()
 
     async def close(self) -> None:
         if self.pool:
             await self.pool.close()
             self.pool = None
-
-    async def seed_markets(self) -> None:
-        assert self.pool
-        count = await self.pool.fetchval("SELECT COUNT(*) FROM market_snapshots")
-        if count:
-            return
-        rows = [("SOL", "Solana", 178.42, 4.82, 2840000000, 8120000000), ("JUP", "Jupiter", 1.12, -2.14, 182000000, 412000000), ("BONK", "Bonk", 0.000031, 8.67, 94000000, 210000000), ("WIF", "dogwifhat", 2.84, 1.34, 211000000, 530000000), ("PYTH", "Pyth Network", 0.39, -0.78, 68000000, 124000000)]
-        await self.pool.executemany("INSERT INTO market_snapshots (symbol,name,price,change_24h,volume_24h,liquidity) VALUES ($1,$2,$3,$4,$5,$6)", rows)
 
     async def markets(self) -> list[dict[str, Any]]:
         if not self.pool: return []
@@ -66,9 +57,8 @@ class NeonRepository:
         return [dict(r) for r in await self.pool.fetch("SELECT * FROM paper_trades ORDER BY created_at DESC LIMIT 50")]
 
     async def history(self, symbol: str) -> list[dict[str, Any]]:
-        markets = await self.markets()
-        base = next((m for m in markets if m["symbol"] == symbol.upper()), markets[0] if markets else {"price": 0})
-        price = float(base["price"])
-        return [{"time": f"-{(11-i)*2}h", "price": round(price * (1 + ((i-5)*0.008) + ((i%3-1)*0.004)), 8)} for i in range(12)]
+        if not self.pool:
+            return []
+        return [dict(r) for r in await self.pool.fetch("SELECT captured_at AS time, price FROM market_snapshots WHERE symbol=$1 ORDER BY captured_at ASC LIMIT 100", symbol.upper())]
 
 repo = NeonRepository()

@@ -23,13 +23,22 @@ async def solana_token_feed(limit: int = 12) -> list[dict[str, Any]]:
         except Exception:
             market = {}
         helius: dict[str, Any] = {}
+        asset: dict[str, Any] | None = None
         if helius_configured():
             asset, supply = await asyncio.gather(get_asset(mint), get_token_supply(mint))
             metadata = (asset or {}).get("content", {}).get("metadata", {})
             token_info = (asset or {}).get("token_info", {})
             helius = {"name": metadata.get("name"), "symbol": token_info.get("symbol") or metadata.get("symbol"), "decimals": token_info.get("decimals") or (supply or {}).get("decimals"), "supply": (supply or {}).get("uiAmount") or (supply or {}).get("amount")}
         base = market.get("base_token") or {}
-        return {"chain_id": "solana", "token_address": mint, "symbol": helius.get("symbol") or base.get("symbol") or "—", "name": helius.get("name") or base.get("name") or "Unknown token", "price": market.get("price_usd") or 0, "change_24h": (market.get("price_change") or {}).get("h24") or 0, "volume_24h": (market.get("volume") or {}).get("h24") or 0, "liquidity": market.get("liquidity_usd") or 0, "icon_url": profile.get("icon"), "profile_url": profile.get("url"), "helius": helius}
+        links = (asset or {}).get("content", {}).get("links", {}) if asset else {}
+        image_url = links.get("image") or profile.get("icon")
+        if not image_url or not image_url.lower().endswith(".svg"):
+            return None
+        symbol = helius.get("symbol") or base.get("symbol")
+        name = helius.get("name") or base.get("name")
+        if not symbol or not name:
+            return None
+        return {"chain_id": "solana", "token_address": mint, "symbol": symbol, "name": name, "price": market.get("price_usd") or 0, "change_24h": (market.get("price_change") or {}).get("h24") or 0, "volume_24h": (market.get("volume") or {}).get("h24") or 0, "liquidity": market.get("liquidity_usd") or 0, "icon_url": image_url, "profile_url": profile.get("url"), "helius": helius}
 
     hydrated = await asyncio.gather(*(hydrate(p) for p in sol_profiles[:limit]))
     return [item for item in hydrated if item]
