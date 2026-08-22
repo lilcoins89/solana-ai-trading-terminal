@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from dotenv import load_dotenv
 
+    load_dotenv("/vercel/share/.env.project")
+    load_dotenv(Path(__file__).resolve().parent.parent / "frontend/.env.development.local")
     load_dotenv(Path(__file__).parent / ".env")
 except ImportError:
     pass
@@ -38,7 +40,7 @@ from data.rugcheck import enrich_rugcheck, get_report, get_summary
 from data.solscan import enrich_solscan
 from analysis.pipeline import run_analysis
 from analysis.schemas import Decision
-from analytics import repo
+from analytics.neon_repository import repo
 
 VERSION = "0.5.0"
 
@@ -62,6 +64,14 @@ app.add_middleware(
 _paper_balance = 10_000.0
 _paper_trades: list[dict] = []
 _paper_positions: dict[str, dict] = {}
+
+@app.on_event("startup")
+async def startup() -> None:
+    await repo.connect()
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    await repo.close()
 
 
 async def _enrich_all(mint: str, pair_address: str | None = None) -> tuple[dict, dict]:
@@ -90,28 +100,28 @@ async def health():
 
 @app.get("/analytics/terminal")
 async def terminal_snapshot():
-    return {"markets": repo.markets(), "watchlist": repo.watchlist(), "analyses": repo.analyses(), "trades": repo.trades(), "analytics_backend": repo.backend}
+    return {"markets": await repo.markets(), "watchlist": await repo.watchlist(), "analyses": await repo.analyses(), "trades": await repo.trades(), "analytics_backend": repo.backend}
 
 @app.get("/analytics/markets/{symbol}/history")
 async def market_history(symbol: str):
-    return repo.history(symbol)
+    return await repo.history(symbol)
 
 @app.get("/analytics/watchlist")
 async def analytics_watchlist():
-    return repo.watchlist()
+    return await repo.watchlist()
 
 @app.post("/analytics/watchlist")
 async def add_watchlist(item: dict):
-    return repo.add_watch(item)
+    return await repo.add_watch(item)
 
 @app.delete("/analytics/watchlist/{address}")
 async def delete_watchlist(address: str):
-    repo.remove_watch(address)
+    await repo.remove_watch(address)
     return {"ok": True}
 
 @app.get("/analytics/analyses")
 async def analysis_history():
-    return repo.analyses()
+    return await repo.analyses()
 
 
 @app.get("/helius/status")
@@ -160,7 +170,7 @@ async def analyze_token(token_address: str):
     mint = (market.get("base_token") or {}).get("address") or token_address
     helius, cross = await _enrich_all(mint, market.get("pair_address"))
     result = run_analysis(market, helius, cross)
-    repo.save_analysis(result.model_dump())
+    await repo.save_analysis(result.model_dump())
     return result
 
 
@@ -321,7 +331,7 @@ async def paper_trade(req: PaperTradeRequest):
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     _paper_trades.append(trade)
-    repo.save_trade(trade)
+    await repo.save_trade(trade)
     return {
         "ok": True,
         "trade": trade,
